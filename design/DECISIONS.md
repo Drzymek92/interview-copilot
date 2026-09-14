@@ -5,8 +5,10 @@
 > small governance CLI (`decision_tools.py`) driven by `ROUTINE_*` process docs. **That CLI and its
 > framework docs are internal tooling and are *not* part of this release** — this decision log and
 > the sibling design docs (`OPEN_DESIGN.md`, `SECURITY_INVARIANTS.md`, `MEASUREMENT_*.md`) are
-> included as **design documentation**, so references below to `decision_tools.py`, `ROUTINE_*`,
-> `agent/…` or internal file paths point at that internal tooling rather than at files in this repo.
+> included as **design documentation**. Any reference below to internal tooling or to a file that is
+> not in this repo — e.g. `decision_tools.py`, `ROUTINE_*`, `INDEX.md`, `METHODOLOGY.md`,
+> `PRINCIPLES.md`, `agent/…`, or `tests/fixtures/salience_fixtures.json` — points at that internal
+> material, not at a path you will find in this public checkout.
 
 **This file is the single source of truth for every project decision.** Other documents must not
 restate a decision — they *apply* it and cite its ID (`D#`). When a decision changes, edit it here

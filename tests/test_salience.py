@@ -8,7 +8,6 @@ model call, because this project's record is that its defects are found by runni
 
 from __future__ import annotations
 
-import json
 import sys
 from pathlib import Path
 
@@ -21,7 +20,6 @@ from config import settings  # noqa: E402
 from scripts import reasoning, salience  # noqa: E402
 from scripts.llm_client import BackendUnavailable, smoke_test  # noqa: E402
 
-FIXTURES = PROJECT_ROOT / "tests" / "fixtures" / "salience_fixtures.json"
 EXAMPLE_SESSION = "example_ai_engineer"
 EXAMPLES_DIR = PROJECT_ROOT / "examples" / "sessions"
 
@@ -136,16 +134,8 @@ def test_cosine_is_a_cosine():
     assert salience.cosine([0.0, 0.0], [1.0, 0.0]) == 0.0
 
 
-# ── 5. The fixture set itself ────────────────────────────────────────────
-@pytest.mark.skipif(not FIXTURES.exists(),
-                    reason="in-sample salience fixture (real interview transcript) not shipped")
-def test_fixtures_are_the_real_call_and_carry_the_in_sample_caveat():
-    doc = json.loads(FIXTURES.read_text(encoding="utf-8"))
-    assert len(doc["cases"]) == 24, "the 24 turns the D20 trigger fired on the real HR call"
-    assert sum(c["salient"] for c in doc["cases"]) == 8
-    assert "IN-SAMPLE" in doc["caveat"], "D20's precedent: never quote these as out-of-sample"
-    assert "live_transcript_20260902_100033" in doc["source"]
-    assert doc["baseline"]["llm"]["min_recall"] >= 0.85, "recall is the clause that must not rot"
+# NOTE: the in-sample salience fixture (a real interview transcript) is private and not shipped in
+# this public repo, so the regression test that pinned its shape lives only in the internal project.
 
 
 # ── 6. The ambient loop actually consults the gate (D12 + D23) ───────────

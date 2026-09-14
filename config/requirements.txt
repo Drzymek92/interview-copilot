@@ -1,5 +1,7 @@
 # interview_copilot — pinned dependencies (Day-1 STT pipeline + capture spike)
 # Interpreter: Python 3.11+. Install: pip install -r requirements.txt
+# NOTE: the repo-root requirements.txt is a copy of this file and is what the README and CI install;
+# if you change a pin here, update the root copy too (keep them identical).
 #
 # NOTE ON NATIVE DEPS (not pip-installable):
 #   * sounddevice needs the PortAudio C library (libportaudio2). On the lab it was

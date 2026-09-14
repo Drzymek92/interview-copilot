@@ -178,8 +178,20 @@ def load_bundle(session: str, sessions_dir: Path | None = None) -> ContextBundle
     root = sessions_dir or SESSIONS_DIR
     session_dir = Path(session) if Path(session).is_dir() else root / session
     manifest = session_dir / "bundle.json"
+    # Fall back to the shipped examples/ so a bare id (e.g. `example_ai_engineer`) resolves out of
+    # the box. Real bundles live under scripts/inputs/sessions/ (gitignored); the example ships
+    # under examples/sessions/ so it can be committed. Only when no explicit sessions_dir was given.
+    if not manifest.is_file() and sessions_dir is None:
+        example_dir = PROJECT_ROOT / "examples" / "sessions" / session
+        if (example_dir / "bundle.json").is_file():
+            session_dir, manifest = example_dir, example_dir / "bundle.json"
     if not manifest.is_file():
-        available = sorted(p.parent.name for p in root.glob("*/bundle.json")) if root.is_dir() else []
+        example_root = PROJECT_ROOT / "examples" / "sessions"
+        available = sorted({
+            p.parent.name
+            for r in (root, example_root) if r.is_dir()
+            for p in r.glob("*/bundle.json")
+        })
         raise FileNotFoundError(
             f"no bundle at {manifest}. Available sessions: {', '.join(available) or '(none)'}"
         )
@@ -1001,8 +1013,16 @@ def main() -> None:
     if args.selftest_heuristic:
         sys.exit(_selftest_heuristic(Path(args.fixtures)))
     if args.selftest_salience:
+        salience_fixtures = Path(args.salience_fixtures)
+        if not salience_fixtures.is_file():
+            print(
+                f"salience self-test skipped: {salience_fixtures.name} is a private, in-sample "
+                "fixture (a real interview transcript) and is not shipped with this repo. "
+                "Point --salience-fixtures at your own labelled set to run it."
+            )
+            sys.exit(0)
         sys.exit(_selftest_salience(
-            Path(args.salience_fixtures), args.session or "example_ai_engineer",
+            salience_fixtures, args.session or "example_ai_engineer",
             args.salience_backend, args.salience_model, args.salience_threshold,
         ))
     if not args.session:

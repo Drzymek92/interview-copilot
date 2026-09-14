@@ -93,7 +93,8 @@ history is in [CHANGELOG.md](CHANGELOG.md).
 
 _(The decision register was propagated and audited by a small internal governance CLI; that tooling
 is not part of this release, so these docs are included as design documentation — references in them
-to `decision_tools.py` or `ROUTINE_*` point at that internal tooling.)_
+to internal tooling or absent files (`decision_tools.py`, `ROUTINE_*`, `INDEX.md`, `METHODOLOGY.md`,
+`agent/…`, `salience_fixtures.json`) point at that internal material, not files in this repo.)_
 
 ## Status
 
