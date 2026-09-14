@@ -1,0 +1,32 @@
+# environment
+.venv/
+venv/
+.env
+config/.env
+
+# data — never commit real interview inputs or generated outputs (privacy invariant, SI1)
+scripts/inputs/
+scripts/outputs/
+logs/
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+
+# credentials (broad guard — keep it, then re-include the specific data files that MUST ship)
+*.json
+*.p12
+# ...but these committed data files are not credentials:
+!examples/**/*.json
+!tests/fixtures/*.json
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# desktop launcher is machine-specific — ship the .template, generate the real .desktop locally
+*.desktop

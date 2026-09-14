@@ -1,0 +1,14 @@
+# interview-copilot:14b — the higher-quality local model (tighter, more speakable answers).
+#
+# Same reason as the 8b build: bake the context window in, because Ollama's OpenAI-compatible
+# endpoint ignores `num_ctx` and silently truncates. qwen3:14b is a 40K-context model, so 16384
+# here is a VRAM choice, not a ceiling.
+#
+# COST: on a 16 GB GPU the 14B (~11.5 GB) plus faster-whisper (~2.2 GB) leaves only ~2 GB of
+# headroom — it is the thing that breaks if something else claims VRAM mid-call. Fall back to the
+# 8b instantly with `--model interview-copilot:8b` (or `OLLAMA_MODEL=interview-copilot:8b`).
+#
+# Build it (see ollama/build_models.sh):
+#   ollama create interview-copilot:14b -f ollama/Modelfile.ic_qwen
+FROM qwen3:14b
+PARAMETER num_ctx 16384

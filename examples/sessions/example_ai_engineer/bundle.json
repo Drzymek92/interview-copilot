@@ -1,0 +1,125 @@
+{
+  "schema_version": 2,
+  "session_id": "example_ai_engineer",
+  "role": "AI Engineer (LLM & RAG)",
+  "company": "Northwind Commerce",
+  "language": {"spoken": "pl", "suggestions": "match"},
+
+  "_about": "A COMPLETELY FICTIONAL example context bundle shipped with the repo. No real person, company, or interview. It exists so the quickstart and the test suite have a real bundle to load. Copy this directory to scripts/inputs/sessions/<your_id>/ and replace every field with your own before a real interview. Schema + authoring notes: docs/SESSION_BUNDLE.md.",
+
+  "job_description": {"file": "job_description.md", "status": "real"},
+  "company_brief": {"file": "company_brief.md", "status": "real"},
+  "resume": {"file": "resume.md", "status": "real"},
+
+  "answer_bank": [
+    {
+      "id": "star_report_automation",
+      "title": "Automated a weekly reporting pipeline",
+      "tags": ["python", "automation", "data", "ownership"],
+      "situation": "The analytics team hand-built a weekly KPI report in spreadsheets — about a day of copy-paste every Monday and frequent transcription errors.",
+      "task": "I offered to remove the manual step entirely and make the numbers reproducible and auditable.",
+      "action": "Wrote a small Python pipeline that pulled from the warehouse, validated each metric against the previous run, rendered a report, and posted it to the shared drive with a run id and a log.",
+      "result": "Cut the Monday task from ~6 hours to under 5 minutes, removed the class of transcription errors, and the team adopted the run-id trail for audits."
+    },
+    {
+      "id": "star_rag_eval",
+      "title": "Built an evaluation harness for a RAG assistant",
+      "tags": ["rag", "evaluation", "llm", "retrieval"],
+      "situation": "A support-docs RAG assistant kept 'improving' in demos while nobody could say whether retrieval had actually regressed between changes.",
+      "task": "Make answer quality measurable so a change could be accepted or rejected on evidence.",
+      "action": "Assembled a labelled question set with known-good passages, scored retrieval (recall@k) and answer faithfulness on every change, and gated merges on the numbers rather than on a demo.",
+      "result": "Two 'obvious' prompt tweaks turned out to lower faithfulness and were reverted; the harness became the definition of done for the assistant."
+    },
+    {
+      "id": "star_latency",
+      "title": "Cut a model endpoint's tail latency",
+      "tags": ["latency", "serving", "profiling", "performance"],
+      "situation": "An internal inference endpoint met its median SLA but blew past it at p95, which is what users actually felt.",
+      "task": "Bring p95 under budget without buying a bigger machine.",
+      "action": "Profiled the request path, found the cost was a cold prefix re-encoded on every call, cached it, and moved a language-conditional block to the end of the prompt so the cache held.",
+      "result": "p95 dropped by roughly half and the median barely moved — the fix was about variance, not raw throughput."
+    },
+    {
+      "id": "star_disagree",
+      "title": "Disagreed with a launch decision, on evidence",
+      "tags": ["communication", "judgement", "quality"],
+      "situation": "A team wanted to ship an LLM feature that looked great on cherry-picked examples but had no offline evaluation behind it.",
+      "task": "Raise the risk without simply blocking the team.",
+      "action": "Ran a quick labelled sample, showed where it failed on realistic inputs, and proposed a one-week eval-gate before launch rather than a veto.",
+      "result": "The team took the week, found and fixed a whole failure class, and shipped with a metric they could defend."
+    },
+    {
+      "id": "star_learn",
+      "title": "Picked up a new framework under a deadline",
+      "tags": ["learning", "adaptability"],
+      "situation": "A project needed a streaming websocket UI in a stack I had not used before, with a fixed demo date.",
+      "task": "Get to a working, honest demo without faking it.",
+      "action": "Built the smallest end-to-end slice first, read the framework's own examples rather than blog posts, and kept a list of what I did not yet understand so I would not overclaim it later.",
+      "result": "The demo worked on real data, and I could say precisely which parts were solid and which were prototype."
+    },
+    {
+      "id": "star_mentoring",
+      "title": "Onboarded a junior engineer onto the codebase",
+      "tags": ["mentoring", "collaboration"],
+      "situation": "A new hire was stuck for days on a pipeline whose failure modes were all tribal knowledge.",
+      "task": "Get them productive and stop the knowledge living only in my head.",
+      "action": "Paired on their first real fix, then wrote the gotchas down as short runbooks so the next person would not need me.",
+      "result": "They shipped independently within the week, and the runbooks cut the same questions from later hires."
+    }
+  ],
+
+  "plan": [
+    {
+      "id": "p1",
+      "title": "Intro and background",
+      "key_points": [
+        "Two-minute arc: what I do now, why AI engineering, why this role",
+        "Lead with the RAG evaluation work — it is the most relevant story"
+      ],
+      "done_signals": ["tell me about yourself", "walk me through your background"]
+    },
+    {
+      "id": "p2",
+      "title": "Technical depth: RAG and evaluation",
+      "key_points": [
+        "Retrieval quality is measured (recall@k), not asserted",
+        "Faithfulness gate before a change ships",
+        "Be honest about what I have run in production vs. in a project"
+      ],
+      "done_signals": ["how do you evaluate", "retrieval", "hallucination", "faithfulness"]
+    },
+    {
+      "id": "p3",
+      "title": "Ways of working and collaboration",
+      "key_points": [
+        "Evidence over demos when disagreeing",
+        "Write the gotchas down so knowledge is not tribal"
+      ],
+      "done_signals": ["team", "disagreement", "conflict", "mentoring"]
+    },
+    {
+      "id": "p4",
+      "title": "Your questions to ask them",
+      "key_points": [
+        "How is model/answer quality measured today?",
+        "What does the first 90 days look like?",
+        "Where does the team feel the most delivery pain?"
+      ],
+      "done_signals": ["do you have any questions", "anything you want to ask"]
+    }
+  ],
+
+  "honesty_boundary": [
+    {"claim": "that I have run Qdrant in production", "truth": "I used Qdrant in a personal project only; the production vector store I worked with was pgvector."},
+    {"claim": "that I built and operate an MLflow experiment-tracking platform", "truth": "I used MLflow as a user for tracking runs; I did not build or operate the platform."},
+    {"claim": "that I have completed my Master's degree", "truth": "degree NOT completed — coursework finished, thesis outstanding; say so plainly if asked."},
+    {"claim": "that I have production experience with Kubernetes", "truth": "I have deployed to a managed platform; my direct Kubernetes experience is limited to a course and local clusters."},
+    {"claim": "that I have fine-tuned large models from scratch", "truth": "I have fine-tuned small models with LoRA on a single GPU; I have not trained large models from scratch."},
+    {"claim": "a specific dollar figure for cost savings I cannot source", "truth": "I can speak to the time saved (about 6 hours a week) but I do not have an audited cost figure — do not invent one."},
+    {"claim": "that I led a team", "truth": "I mentored one junior engineer and owned features end-to-end; I have not held a formal lead or line-management role."},
+    {"claim": "fluency in a language I only read", "truth": "State the honest level (e.g. working proficiency) rather than rounding up to fluent."},
+    {"claim": "hands-on experience with a cloud service I have only read about", "truth": "Name what I have actually used; for the rest, say I have read about it and would need to ramp up."},
+    {"claim": "that any latency or quality number is exact when it was a rough measurement", "truth": "Qualify rough numbers as approximate ('roughly half', 'about 5 minutes') — never present an estimate as a measured fact."},
+    {"claim": "familiarity with this company's internal tools or codebase", "truth": "I have only public information about the company; be explicit that I am reasoning from the outside."}
+  ]
+}

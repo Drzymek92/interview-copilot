@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # sounddevice binds PortAudio at import time; the CI runner has no audio server but the
+      # library must still load, so the tests that import the capture modules can be collected.
+      - name: Install native audio deps
+        run: sudo apt-get update && sudo apt-get install -y libportaudio2
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      # No GPU and no Ollama on the runner: the STT model never loads, and the live/model tests
+      # skip themselves (see the `@live` / skipif guards in tests/). What runs here is the
+      # deterministic core — bundle loading against the shipped example, the question trigger,
+      # the salience gate logic, the dashboard meter math, and the transcript seams.
+      - name: Run tests
+        run: pytest tests/ -q

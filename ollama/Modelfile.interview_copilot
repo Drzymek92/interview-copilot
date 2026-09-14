@@ -1,0 +1,12 @@
+# interview-copilot:8b — the fast local default for suggestions.
+#
+# WHY THIS EXISTS: the stock `llama3.1:8b` tag ships a 4096-token context window, and a full
+# session bundle (JD + résumé + STAR bank + honesty boundary) is ~9-12k tokens. Ollama SILENTLY
+# TRUNCATES an over-long prompt — no error — and its OpenAI-compatible endpoint IGNORES
+# `options.num_ctx`, so the window MUST be baked into the model. Without this custom build the
+# copilot degrades silently (it drops most of the bundle, including the honesty boundary).
+#
+# Build it (see ollama/build_models.sh):
+#   ollama create interview-copilot:8b -f ollama/Modelfile.interview_copilot
+FROM llama3.1:8b
+PARAMETER num_ctx 16384

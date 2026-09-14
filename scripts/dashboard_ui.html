@@ -1,0 +1,955 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#12151b">
+<title>Interview copilot — live</title>
+<!--
+  D18 dashboard UI. Deliberately dependency-free and self-contained: no webfont, no CDN script,
+  no stylesheet from a network. That is not minimalism, it is SI1 — this page renders an
+  interview transcript, and a font request is an egress.
+
+  SI2/D11: the disclosure banner below is permanent. There is no hide control, no opacity
+  slider, no click-through, no always-on-top. Do not add one.
+
+  The meter's arithmetic is NOT here. It is computed in Python (dashboard.meter_state, a pure
+  tested function) and pushed; this file only paints what it is told, and greys the whole panel
+  out when the ticks stop, so a frozen socket can never leave a confident number on screen.
+-->
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #12151b;
+    --panel: #1a1e27;
+    --panel-2: #202634;
+    --line: #2c3444;
+    --ink: #e8ecf3;
+    --ink-dim: #97a1b4;
+    --ink-faint: #6b7488;
+    --them: #7cc4ff;
+    --you: #9be3b4;
+    --warn: #ffcf7a;
+    --bad: #ff9a8c;
+    --ok: #7ee0a8;
+    --accent: #b9a6ff;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+  }
+  .skip {
+    position: absolute; left: -9999px; top: 0; z-index: 10;
+    background: var(--accent); color: #12151b; padding: 8px 14px; border-radius: 0 0 var(--radius) 0;
+  }
+  .skip:focus { left: 0; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+
+  /* --- disclosure (SI2 — permanent) --- */
+  .disclosure {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px;
+    padding: 10px 16px; background: #251f33; border-bottom: 1px solid #3a3350;
+    font-size: 13px;
+  }
+  .disclosure strong { color: var(--accent); font-weight: 650; }
+  .disclosure .sep { color: var(--ink-faint); }
+  .meta { color: var(--ink-dim); }
+  .meta code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+
+  /* --- offline curtain: the panel must never look live when it is not --- */
+  .stale-curtain {
+    display: none; padding: 10px 16px; background: #3a2222; border-bottom: 1px solid #5b3030;
+    color: var(--bad); font-size: 14px;
+  }
+  body.disconnected .stale-curtain { display: block; }
+  body.disconnected main { opacity: 0.45; }
+  main { transition: opacity 160ms ease; }
+  @media (prefers-reduced-motion: reduce) { main { transition: none; } }
+
+  main {
+    flex: 1; min-height: 0;
+    display: grid; gap: 12px; padding: 12px;
+    /* Suggestion is the primary panel (first column, widest) — it is what the user reads while
+       answering; transcript is the reference beside it; plan the narrow rail. */
+    grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) minmax(0, 0.7fr);
+  }
+  @media (max-width: 1100px) { main { grid-template-columns: minmax(0, 1fr); } }
+
+  section {
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    display: flex; flex-direction: column; min-height: 0; min-width: 0; overflow: hidden;
+  }
+  h1 { font-size: 15px; margin: 0; font-weight: 650; }
+  h2 {
+    font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-dim);
+    margin: 0; font-weight: 650;
+  }
+  .head {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--panel-2);
+  }
+  .body { overflow-y: auto; overflow-x: hidden; padding: 12px 14px; flex: 1; min-height: 0; }
+  .count { font-size: 12px; color: var(--ink-dim); font-variant-numeric: tabular-nums; }
+
+  /* --- meter (P5 option A) --- */
+  .meter { padding: 14px; border-bottom: 1px solid var(--line); }
+  .meter-label {
+    font-size: 19px; font-weight: 600; font-variant-numeric: tabular-nums;
+    display: flex; align-items: baseline; gap: 10px; text-wrap: balance;
+  }
+  .meter-icon { font-size: 15px; }
+  /* --ink-dim, not --ink-faint: this is body text and must clear AA (6.41:1, not 3.56:1). */
+  .meter-note { font-size: 12px; color: var(--ink-dim); margin-top: 6px; }
+  .meter-track {
+    height: 6px; margin-top: 10px; border-radius: 999px; background: #2a3140; overflow: hidden;
+  }
+  .meter-fill {
+    /* Scaled, not resized: this bar is repainted 4x a second, so it animates `transform`
+       and `background-color` only — never `width`, which would relayout on every tick. */
+    height: 100%; width: 100%; border-radius: 999px; background: var(--ok);
+    transform: scaleX(0); transform-origin: left center;
+    /* The BAR IS NOT ANIMATED, deliberately. It is repainted every METER_TICK_SECONDS
+       (0.25 s), so a 200 ms transition never settles before the next tick — it leaves a
+       permanently-running CSSTransition that pins the bar at its base scaleX(0) (observed) and,
+       even when it does run, shows an interpolation toward the number rather than the number.
+       This bar stands next to a value someone reads under pressure: it shows where the clock
+       actually is. Only the colour, which changes on a state flip and not on a tick, eases. */
+    transition: background-color 200ms linear;
+  }
+  @media (prefers-reduced-motion: reduce) { .meter-fill { transition: none; } }
+  .m-waiting .meter-label { color: var(--ink); }
+  .m-waiting .meter-fill { background: var(--ok); }
+  .m-overdue .meter-label { color: var(--bad); }
+  .m-overdue .meter-fill { background: var(--bad); transform: scaleX(1) !important; }
+  .m-cold .meter-label { color: var(--ink-dim); font-size: 16px; }
+  .m-cold .meter-fill { background: var(--ink-faint); transform: scaleX(0) !important; }
+
+  /* --- transcript --- */
+  .turn { margin-bottom: 12px; display: flex; flex-direction: column; content-visibility: auto; contain-intrinsic-size: auto 78px; }
+  .turn.you { align-items: flex-end; }
+  .bubble {
+    max-width: 88%; padding: 8px 11px; border-radius: var(--radius);
+    background: var(--panel-2); border: 1px solid var(--line);
+    overflow-wrap: anywhere; word-break: break-word;
+  }
+  .turn.them .bubble { border-left: 3px solid var(--them); }
+  .turn.you .bubble { border-right: 3px solid var(--you); background: #1e2a26; }
+  .turn.untagged .bubble { border-left: 3px dashed var(--warn); }
+  .who {
+    font-size: 11px; color: var(--ink-dim); margin-bottom: 3px;
+    font-variant-numeric: tabular-nums; display: flex; gap: 6px; align-items: center;
+  }
+  .turn.them .who b { color: var(--them); }
+  .turn.you .who b { color: var(--you); }
+  .turn.untagged .who b { color: var(--warn); }
+  .who b { font-weight: 650; }
+
+  /* --- D25 provisional: the segment that is still being spoken -------------
+     It must not be mistakable for a transcript line. Three signals, none of them
+     motion: a dashed bubble, a literal "provisional" word, and dimmed text. No
+     animation at all, so there is nothing for prefers-reduced-motion to reduce. */
+  .turn.provisional .bubble {
+    border-style: dashed;
+    background: transparent;
+    color: var(--ink-dim);
+  }
+  .turn.provisional.them .bubble { border-left: 3px dashed var(--them); }
+  .turn.provisional.you .bubble { border-right: 3px dashed var(--you); }
+  .prov-tag {
+    font-size: 10.5px; font-weight: 650; letter-spacing: 0.03em; text-transform: uppercase;
+    color: var(--warn);
+  }
+  /* --ink-dim, not --ink-faint: this sentence is the one that tells the reader the text
+     above it is going to be replaced, so it has to clear AA (6.41:1, not 3.56:1). */
+  .prov-note { font-size: 11px; color: var(--ink-dim); margin-top: 3px; }
+
+  /* --- suggestion --- */
+  .sugg-body { padding: 12px 14px; overflow-y: auto; flex: 1; min-height: 0; }
+  .sugg-q {
+    font-size: 12.5px; color: var(--ink-dim); border-left: 2px solid var(--line);
+    padding-left: 10px; margin-bottom: 10px; overflow-wrap: anywhere;
+  }
+  .sugg-text { overflow-wrap: anywhere; font-size: 16.5px; line-height: 1.6; }
+  /* Structured suggestion (POINT / EVIDENCE / DETAIL / bullets). The POINT is the one line the
+     user must catch mid-answer, so it is a hero callout; the rest is labelled and calm. */
+  .sugg-block { margin-bottom: 12px; }
+  .sugg-block:last-child { margin-bottom: 0; }
+  .sugg-label {
+    font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--ink-dim); margin-bottom: 3px;
+  }
+  .sugg-para { margin-bottom: 5px; }
+  .sugg-para:last-child { margin-bottom: 0; }
+  .sugg-bullet { position: relative; padding-left: 18px; margin-bottom: 6px; }
+  .sugg-bullet::before { content: "▸"; position: absolute; left: 3px; color: var(--accent); }
+  .sugg-block.point {
+    background: var(--panel-2); border-left: 3px solid var(--accent);
+    border-radius: 8px; padding: 11px 13px; margin-bottom: 14px;
+  }
+  .sugg-block.point .sugg-label { color: var(--accent); }
+  .sugg-block.point .sugg-content { font-size: 19px; font-weight: 600; line-height: 1.5; color: var(--ink); }
+  .stale .sugg-block.point { background: transparent; }
+  .stale .sugg-block.point .sugg-content, .stale .sugg-text { color: var(--ink-dim); }
+  .badge {
+    display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 650;
+    padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--ink-dim);
+    letter-spacing: 0.02em; white-space: nowrap;
+  }
+  .badge.live { color: var(--ok); border-color: #2f5a44; }
+  .badge.stale { color: var(--warn); border-color: #5c4a28; }
+  .badge.gone { color: var(--bad); border-color: #5b3030; }
+  .stale .sugg-text { color: var(--ink-dim); }
+
+  /* --- suggestion history (return to a previous suggestion mid-call) ---
+     The section is a flex column. Without a bound here a long history took its natural height
+     and squeezed .sugg-body (flex: 1, min-height: 0) to nothing — the LIVE suggestion vanished
+     under the list (reported after live testing). Two guards: the live body keeps
+     at least 45% of the section, and the history is capped at 40% and scrolls INSIDE itself.
+     The head is a button that collapses the list to one line (state kept in localStorage). */
+  .sugg-body { flex: 1 1 auto; min-height: 45%; }
+  .sugg-history {
+    border-top: 1px solid var(--line); padding: 8px 14px 10px;
+    flex: 0 1 auto; max-height: 40%; min-height: 0;
+    display: flex; flex-direction: column;
+  }
+  .sugg-history-head {
+    font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--ink-faint); margin-bottom: 6px; flex: 0 0 auto;
+    display: flex; align-items: center; gap: 6px; width: 100%; text-align: left;
+    background: none; border: 0; padding: 2px 0; cursor: pointer; font-family: inherit;
+  }
+  .sugg-history-head:hover { color: var(--ink-dim); }
+  .sugg-history-head::before { content: "▾"; color: var(--ink-faint); transition: transform 0.12s ease; }
+  .sugg-history.collapsed .sugg-history-head::before { transform: rotate(-90deg); }
+  .sugg-history.collapsed #sugg-history-list { display: none; }
+  .sugg-history.collapsed { flex: 0 0 auto; max-height: none; }
+  #sugg-history-list { overflow-y: auto; overflow-x: hidden; min-height: 0; flex: 1 1 auto; }
+  .hist-item { border-bottom: 1px solid var(--line); }
+  .hist-item:last-child { border-bottom: 0; }
+  .hist-row {
+    display: block; width: 100%; text-align: left; background: none; border: 0; cursor: pointer;
+    color: var(--ink); padding: 8px 22px 8px 0; position: relative; font: inherit;
+  }
+  .hist-row::after {
+    content: "▸"; position: absolute; right: 4px; top: 8px; color: var(--ink-faint);
+    transition: transform 0.12s ease;
+  }
+  .hist-item.open .hist-row::after { transform: rotate(90deg); }
+  .hist-row:hover { color: var(--accent); }
+  .hist-q { display: block; font-size: 12px; color: var(--ink-dim); overflow-wrap: anywhere; }
+  .hist-point {
+    display: block; font-size: 14px; margin-top: 2px; overflow-wrap: anywhere;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .hist-item.open .hist-point { white-space: normal; }
+  .hist-detail { padding: 4px 0 10px; font-size: 15px; line-height: 1.55; }
+
+  /* --- plan --- */
+  .step { padding: 9px 0; border-bottom: 1px solid var(--line); }
+  .step:last-child { border-bottom: 0; }
+  .step-title { display: flex; gap: 8px; align-items: flex-start; justify-content: space-between; }
+  .step-title span { overflow-wrap: anywhere; }
+  /* --ink-dim, not --ink-faint: body text, must clear AA (6.41:1, not 3.56:1). */
+  .step-sig { font-size: 11.5px; color: var(--ink-dim); margin-top: 4px; overflow-wrap: anywhere; }
+  .legend { font-size: 11.5px; color: var(--ink-dim); padding: 10px 14px; border-top: 1px solid var(--line); }
+
+  .empty { color: var(--ink-dim); font-size: 13.5px; text-wrap: pretty; }
+  .visually-hidden {
+    position: absolute; width: 1px; height: 1px; overflow: hidden;
+    clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
+  }
+
+  /* --- control bar (#607 single-app switches) --- */
+  .controls {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px 22px;
+    padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  .switch { display: inline-flex; align-items: center; gap: 9px; cursor: pointer; user-select: none; }
+  .switch input { position: absolute; opacity: 0; width: 0; height: 0; }  /* focus goes to .track */
+  .switch .track {
+    position: relative; flex: 0 0 auto; width: 38px; height: 22px; border-radius: 11px;
+    background: #3a4150; border: 1px solid var(--line); transition: background .15s ease;
+  }
+  @media (prefers-reduced-motion: reduce) { .switch .track, .switch .track::after { transition: none; } }
+  .switch .track::after {
+    content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px;
+    border-radius: 50%; background: var(--ink); transition: transform .15s ease;
+  }
+  .switch input:checked + .track { background: var(--ok); }
+  .switch input:checked + .track::after { transform: translateX(16px); }
+  .switch input:focus-visible + .track { outline: 2px solid var(--ink); outline-offset: 2px; }
+  .switch-name { font-size: 13px; color: var(--ink); }
+  .switch-state { font-size: 12px; color: var(--ink-dim); }
+  .switch.egress input:checked + .track { background: var(--bad); }   /* "+ api" = egress = red, not green */
+  .switch.disabled { cursor: not-allowed; opacity: .5; }
+  .switch.disabled input { pointer-events: none; }
+  .control-msg { font-size: 12px; color: var(--ink-dim); margin-left: auto; overflow-wrap: anywhere; }
+  .control-msg.egress { color: var(--bad); font-weight: 600; }
+  .control-msg.error { color: var(--bad); }
+  .m-off .meter-label { color: var(--ink-dim); }
+  .m-off .meter-fill { background: var(--ink-faint); transform: scaleX(0) !important; }
+</style>
+</head>
+<body class="disconnected">
+<a class="skip" href="#transcript">Skip to transcript</a>
+
+<header class="disclosure">
+  <h1>Interview copilot — live</h1>
+  <span class="sep">·</span>
+  <strong>Disclosed AI assistance (D11)</strong>
+  <span class="sep">·</span>
+  <span class="meta">Local only — bound to <code translate="no">127.0.0.1</code>, nothing leaves this machine</span>
+  <span class="sep">·</span>
+  <span class="meta" id="run-info">connecting…</span>
+</header>
+
+<!-- #607 single-app switches. Hidden unless the server runs in --app mode (hello.controls). -->
+<div class="controls" id="controls" hidden>
+  <label class="switch" id="wrap-transcription">
+    <input type="checkbox" id="sw-transcription">
+    <span class="track"></span>
+    <span class="switch-name">Transcription <span class="switch-state" id="st-transcription">off</span></span>
+  </label>
+  <label class="switch" id="wrap-suggestions">
+    <input type="checkbox" id="sw-suggestions">
+    <span class="track"></span>
+    <span class="switch-name">Suggestions <span class="switch-state" id="st-suggestions">on</span></span>
+  </label>
+  <label class="switch egress" id="wrap-backend">
+    <input type="checkbox" id="sw-backend">
+    <span class="track"></span>
+    <span class="switch-name">Answers: <span class="switch-state" id="st-backend">local only</span></span>
+  </label>
+  <span class="control-msg" id="control-msg" role="status"></span>
+</div>
+
+<div class="stale-curtain" role="status">
+  <strong>Not live.</strong> <span id="stale-why">The dashboard is not connected — everything below is a frozen snapshot and may already be wrong.</span>
+</div>
+
+<main>
+  <section aria-labelledby="sugg-h">
+    <div class="meter m-cold" id="meter">
+      <div class="meter-label">
+        <span class="meter-icon" id="meter-icon" aria-hidden="true">○</span>
+        <span id="meter-text">waiting for the first transcript line</span>
+      </div>
+      <div class="meter-note" id="meter-note"></div>
+      <div class="meter-track" aria-hidden="true"><div class="meter-fill" id="meter-fill"></div></div>
+      <p class="visually-hidden" role="status" id="meter-announce"></p>
+    </div>
+    <div class="head">
+      <h2 id="sugg-h">Suggestion</h2>
+      <span class="count" id="gate-count">gate: 0 fired · 0 dropped</span>
+    </div>
+    <div class="sugg-body" id="sugg-body">
+      <p class="empty">Nothing suggested yet. A suggestion appears only when a line clears the question rule <em>and</em> the salience gate (D23) — most turns clear neither, and a blank panel here is the normal state.</p>
+    </div>
+    <div class="sugg-history" id="sugg-history" hidden>
+      <button type="button" class="sugg-history-head" id="sugg-history-head" aria-expanded="true" aria-controls="sugg-history-list">Earlier suggestions</button>
+      <div id="sugg-history-list"></div>
+    </div>
+  </section>
+
+  <section aria-labelledby="transcript-h" id="transcript">
+    <div class="head">
+      <h2 id="transcript-h">Transcript</h2>
+      <span class="count" id="transcript-count">0 lines</span>
+    </div>
+    <div class="body" id="transcript-body">
+      <p class="empty">No transcript lines yet. Lines appear here as <code translate="no">live_transcribe.py</code> closes each segment — the interviewer on the left, you on the right.</p>
+      <!-- D25: the still-open segment. role="status" announces it politely; the recorder does
+           not rewrite text that has not changed, so an announcement always carries new words. -->
+      <div id="provisional-slot" role="status" aria-label="Provisional text for the segment still being spoken"></div>
+    </div>
+  </section>
+
+  <section aria-labelledby="plan-h">
+    <div class="head">
+      <h2 id="plan-h">Plan</h2>
+      <span class="count" id="plan-count">read-only</span>
+    </div>
+    <div class="body" id="plan-body">
+      <p class="empty">No plan loaded for this session.</p>
+    </div>
+    <p class="legend" id="plan-legend"></p>
+  </section>
+</main>
+
+<script>
+"use strict";
+// Everything below paints server-computed state. It derives no timing of its own: the meter is
+// pushed by the server on a cadence, and if those ticks stop the page declares itself stale
+// rather than continuing to show the last number as if it were current.
+
+const el = (id) => document.getElementById(id);
+const TICK_GRACE_MS = 2000;
+
+let lastTick = 0;
+let plan = [];
+let trackMentions = false;
+let suggestionEl = null;
+let suggestionTextEl = null;
+let suggestionBadgeEl = null;
+let currentSuggestionId = null;
+let suggestionRaw = "";        // accumulated raw text, re-parsed into structure on each token
+
+function setConnected(ok, why) {
+  document.body.classList.toggle("disconnected", !ok);
+  if (!ok && why) el("stale-why").textContent = why;
+}
+
+/* ---------------- transcript ---------------- */
+function renderLine(line) {
+  const body = el("transcript-body");
+  const first = body.querySelector(".empty");
+  if (first) first.remove();
+
+  const turn = document.createElement("article");
+  const side = line.tagged ? line.speaker : "untagged";
+  turn.className = "turn " + (line.speaker === "you" ? "you" : "them") + (line.tagged ? "" : " untagged");
+
+  const who = document.createElement("div");
+  who.className = "who";
+  const name = document.createElement("b");
+  // An untagged line is labelled as untagged. It is treated as the interviewer downstream
+  // (parse_transcript_line), but the screen must not present an inference as an observation.
+  name.textContent = line.tagged ? (line.speaker === "you" ? "You" : "Interviewer") : "Untagged (assumed interviewer)";
+  who.appendChild(name);
+  const stamp = document.createElement("span");
+  stamp.textContent = line.stamp + (line.language ? " · " + line.language : "");
+  who.appendChild(stamp);
+
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  bubble.textContent = line.text;      // textContent, never innerHTML — this is call content
+
+  turn.appendChild(who);
+  turn.appendChild(bubble);
+  // Before the provisional slot, never after it: the provisional describes the segment being
+  // spoken NOW, so it belongs below every line that has actually arrived.
+  body.insertBefore(turn, el("provisional-slot"));
+
+  scrollTranscript(body);
+}
+
+function scrollTranscript(body) {
+  const nearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 140;
+  if (nearBottom) body.scrollTop = body.scrollHeight;
+}
+
+/* D25: the provisional line for the segment that is still open. One slot, replaced wholesale
+   on every update and emptied when the final line supersedes it — there is no path that leaves
+   provisional text on screen next to the final text for the same segment. */
+function renderProvisional(p) {
+  const slot = el("provisional-slot");
+  slot.textContent = "";
+  if (!p || !p.text) return;
+
+  const body = el("transcript-body");
+  const first = body.querySelector(".empty");
+  if (first) first.remove();
+
+  const turn = document.createElement("article");
+  turn.className = "turn provisional " + (p.speaker === "you" ? "you" : "them");
+
+  const who = document.createElement("div");
+  who.className = "who";
+  const name = document.createElement("b");
+  name.textContent = p.tagged ? (p.speaker === "you" ? "You" : "Interviewer") : "Untagged (assumed interviewer)";
+  who.appendChild(name);
+  const tag = document.createElement("span");
+  tag.className = "prov-tag";
+  tag.textContent = "provisional";
+  who.appendChild(tag);
+  const stamp = document.createElement("span");
+  stamp.textContent = p.stamp + (p.language ? " · " + p.language : "");
+  who.appendChild(stamp);
+
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  bubble.textContent = p.text;        // textContent, never innerHTML — this is call content
+
+  const note = document.createElement("div");
+  note.className = "prov-note";
+  note.textContent = "still being said — this text will be replaced by the transcript line";
+
+  turn.appendChild(who);
+  turn.appendChild(bubble);
+  turn.appendChild(note);
+  slot.appendChild(turn);
+
+  scrollTranscript(body);
+}
+
+function renderCounters(c, dropped) {
+  const bits = [c.lines + (c.lines === 1 ? " line" : " lines"),
+                c.them + " them", c.you + " you"];
+  if (c.untagged) bits.push(c.untagged + " untagged");
+  if (dropped) bits.push(dropped + " older dropped");
+  // The provisional tally is the panel's own audit of D25: how many provisional lines it put
+  // up, and how many were taken down by the transcript rather than left standing. `orphaned`
+  // is the one to watch — a provisional whose segment produced no final line at all.
+  if (c.provisional) {
+    let prov = c.provisional + " provisional (" + c.prov_superseded + " superseded";
+    if (c.prov_orphaned) prov += " · " + c.prov_orphaned + " orphaned";
+    if (c.prov_expired) prov += " · " + c.prov_expired + " expired";
+    bits.push(prov + ")");
+  }
+  el("transcript-count").textContent = bits.join(" · ");
+  // The cooldown is reported separately from the gate: with --no-salience the gate is not
+  // running at all, and folding a cooldown into "dropped" would describe a gate that is off.
+  let gate = "gate: " + c.fired + " fired · " + c.dropped + " dropped";
+  if (c.cooldown) gate += " · " + c.cooldown + " held by cooldown";
+  el("gate-count").textContent = gate;
+}
+
+/* ---------------- meter (P5 option A) ---------------- */
+const METER_ICON = { cold: "○", waiting: "◔", overdue: "△" };
+let announcedState = null;
+
+function renderMeter(m) {
+  const box = el("meter");
+  // #607: with transcription switched OFF there is deliberately no pipeline to be late — the
+  // meter would otherwise climb to "overdue" and read as a stall. Show an explicit paused state
+  // instead, so the one number the user reads under pressure never lies about why it is silent.
+  if (transcriptionOn === false && el("controls").hidden === false) {
+    box.className = "meter m-off";
+    el("meter-icon").textContent = "⏸";
+    el("meter-text").textContent = "transcription off";
+    el("meter-note").textContent = "Turn Transcription on to start capturing and timing the call.";
+    el("meter-fill").style.transform = "scaleX(0)";
+    if (announcedState !== "off") { announcedState = "off"; el("meter-announce").textContent = "transcription off"; }
+    return;
+  }
+  box.className = "meter m-" + m.state;
+  el("meter-icon").textContent = METER_ICON[m.state] || "○";   // never colour alone
+  el("meter-text").textContent = m.label;
+
+  let note = "";
+  if (m.state === "waiting") {
+    note = "Ceiling " + fmt(m.ceiling_seconds) + " s — the segment cap plus decode. Silence between segments is not bounded by it.";
+  } else if (m.state === "overdue") {
+    note = "The ceiling has passed, so there is no promise left to show. This happened once in 109 gaps on the real call (43 s, a silence between segments).";
+  } else {
+    note = "No line has arrived yet, so there is no interval to measure.";
+  }
+  el("meter-note").textContent = note;
+
+  const fill = el("meter-fill");
+  if (m.state === "waiting" && m.ceiling_seconds > 0) {
+    const frac = Math.max(0, Math.min(1, m.since_seconds / m.ceiling_seconds));
+    fill.style.transform = "scaleX(" + frac.toFixed(3) + ")";
+  }
+  // Announce the STATE CHANGE only. A polite live region on a 4 Hz counter would make the
+  // page unusable with a screen reader.
+  if (m.state !== announcedState) {
+    announcedState = m.state;
+    el("meter-announce").textContent = m.label;
+  }
+}
+
+function fmt(n) {
+  return new Intl.NumberFormat(navigator.language || "en", { maximumFractionDigits: 1 }).format(n);
+}
+
+/* ---------------- suggestion ---------------- */
+// The model answers in a POINT: / EVIDENCE: / DETAIL: contract (config/settings.py). Render it as
+// structure, not a wall of text, so the POINT — the one line to say — is caught at a glance. Runs
+// on every streamed token; it rebuilds a small panel, which is cheap for a ~200-word answer.
+const SUGG_LABELS = ["POINT", "EVIDENCE", "DETAIL", "SAY", "CODE", "AVOID", "NOTE", "ANSWER"];
+function formatSuggestion(container, raw) {
+  container.textContent = "";
+  let content = null;                       // the .sugg-content of the block currently being filled
+  const openBlock = (label) => {
+    const block = document.createElement("div");
+    block.className = "sugg-block" + (label === "POINT" ? " point" : "");
+    if (label) {
+      const lab = document.createElement("div");
+      lab.className = "sugg-label";
+      lab.textContent = label;
+      block.appendChild(lab);
+    }
+    content = document.createElement("div");
+    content.className = "sugg-content";
+    block.appendChild(content);
+    container.appendChild(block);
+    return content;
+  };
+  for (const line of (raw || "").split("\n")) {
+    const m = line.match(/^\s*([A-Za-z][A-Za-z ]{1,10}?)\s*:\s*(.*)$/);
+    const label = m && SUGG_LABELS.includes(m[1].trim().toUpperCase()) ? m[1].trim().toUpperCase() : null;
+    if (label) {
+      openBlock(label);
+      if (m[2]) appendPara(content, m[2]);
+      continue;
+    }
+    if (content === null) openBlock(null);  // preamble before any label
+    const bullet = line.match(/^\s*[-•*]\s+(.*)$/);
+    if (bullet) {
+      const li = document.createElement("div");
+      li.className = "sugg-bullet";
+      li.textContent = bullet[1];
+      content.appendChild(li);
+    } else if (line.trim() !== "") {
+      appendPara(content, line);
+    }
+  }
+}
+function appendPara(content, textLine) {
+  const p = document.createElement("div");
+  p.className = "sugg-para";
+  p.textContent = textLine;
+  content.appendChild(p);
+}
+
+function renderSuggestion(s) {
+  const body = el("sugg-body");
+  body.textContent = "";
+  currentSuggestionId = s.id;
+
+  const wrap = document.createElement("div");
+
+  const head = document.createElement("div");
+  head.style.cssText = "display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap";
+  const badge = document.createElement("span");
+  badge.className = "badge live";
+  badge.textContent = s.status === "streaming" ? "writing…" : s.status;
+  head.appendChild(badge);
+  if (s.language) {
+    const lang = document.createElement("span");
+    lang.className = "badge";
+    lang.textContent = s.language;
+    head.appendChild(lang);
+  }
+  wrap.appendChild(head);
+
+  const q = document.createElement("div");
+  q.className = "sugg-q";
+  q.textContent = (s.stamp ? "[" + s.stamp + "] " : "") + s.segment;
+  wrap.appendChild(q);
+
+  const text = document.createElement("div");
+  text.className = "sugg-text";
+  wrap.appendChild(text);
+  suggestionRaw = s.text || "";
+  formatSuggestion(text, suggestionRaw);
+
+  if (s.note) {
+    const note = document.createElement("p");
+    note.className = "meter-note";
+    note.textContent = s.note;
+    wrap.appendChild(note);
+  }
+
+  body.appendChild(wrap);
+  suggestionEl = wrap;
+  suggestionTextEl = text;
+  suggestionBadgeEl = badge;
+  applyStatus(s.status);
+}
+
+function applyStatus(status) {
+  if (!suggestionBadgeEl) return;
+  suggestionBadgeEl.className = "badge " + (status === "streaming" ? "live"
+    : status === "complete" ? "live" : "gone");
+  suggestionBadgeEl.textContent = status === "streaming" ? "writing…"
+    : status === "complete" ? "answer" : status;
+}
+
+function renderAge(age) {
+  if (!suggestionEl || !age) return;
+  suggestionEl.classList.toggle("stale", !!age.stale);
+  if (!suggestionBadgeEl) return;
+  if (age.stale) {
+    suggestionBadgeEl.className = "badge stale";
+    suggestionBadgeEl.textContent = "stale — " + age.lines_since + " lines since";
+  }
+}
+
+/* ---------------- suggestion history ---------------- */
+// The POINT line is what the user scans for, so pull it out for the collapsed row; fall back to
+// the first non-empty line if a past answer never emitted a POINT label.
+function pointPreview(raw) {
+  const lines = (raw || "").split("\n");
+  for (const line of lines) {
+    const m = line.match(/^\s*POINT\s*:\s*(.*)$/i);
+    if (m && m[1].trim()) return m[1].trim();
+  }
+  for (const line of lines) {
+    if (line.trim()) return line.trim().replace(/^\s*[-•*]\s*/, "");
+  }
+  return "(no text)";
+}
+
+// Collapsed/expanded is a per-viewer convenience: remembered in localStorage, default expanded.
+const HISTORY_COLLAPSED_KEY = "copilot.historyCollapsed";
+function applyHistoryCollapsed(collapsed) {
+  const wrap = el("sugg-history");
+  wrap.classList.toggle("collapsed", collapsed);
+  el("sugg-history-head").setAttribute("aria-expanded", collapsed ? "false" : "true");
+}
+function initHistoryToggle() {
+  let collapsed = false;
+  try { collapsed = localStorage.getItem(HISTORY_COLLAPSED_KEY) === "1"; } catch (e) { /* storage blocked */ }
+  applyHistoryCollapsed(collapsed);
+  el("sugg-history-head").addEventListener("click", () => {
+    const next = !el("sugg-history").classList.contains("collapsed");
+    applyHistoryCollapsed(next);
+    try { localStorage.setItem(HISTORY_COLLAPSED_KEY, next ? "1" : "0"); } catch (e) { /* ignore */ }
+  });
+}
+
+function renderHistory(list) {
+  const items = list || [];
+  const wrap = el("sugg-history");
+  const body = el("sugg-history-list");
+  body.textContent = "";
+  if (!items.length) { wrap.hidden = true; return; }
+  wrap.hidden = false;
+  el("sugg-history-head").textContent = "Earlier suggestions (" + items.length + ")";
+  // Newest first — the one most likely to be reached back for.
+  for (const s of items.slice().reverse()) {
+    const item = document.createElement("div");
+    item.className = "hist-item";
+
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "hist-row";
+    const q = document.createElement("span");
+    q.className = "hist-q";
+    q.textContent = (s.stamp ? "[" + s.stamp + "] " : "")
+      + (s.segment || "") + (s.status === "superseded" ? "  · interrupted" : "");
+    const pt = document.createElement("span");
+    pt.className = "hist-point";
+    pt.textContent = pointPreview(s.text);
+    btn.appendChild(q);
+    btn.appendChild(pt);
+
+    const detail = document.createElement("div");
+    detail.className = "hist-detail";
+    detail.hidden = true;
+    btn.addEventListener("click", () => {
+      if (detail.childElementCount === 0) formatSuggestion(detail, s.text || "");
+      detail.hidden = !detail.hidden;
+      item.classList.toggle("open", !detail.hidden);
+    });
+
+    item.appendChild(btn);
+    item.appendChild(detail);
+    body.appendChild(item);
+  }
+}
+
+/* ---------------- plan (read-only) ---------------- */
+function renderPlan(steps) {
+  plan = steps || [];
+  const body = el("plan-body");
+  body.textContent = "";
+  if (!plan.length) {
+    const p = document.createElement("p");
+    p.className = "empty";
+    p.textContent = "No plan loaded for this session.";
+    body.appendChild(p);
+    el("plan-legend").textContent = "";
+    return;
+  }
+  for (const step of plan) {
+    const row = document.createElement("div");
+    row.className = "step";
+    const title = document.createElement("div");
+    title.className = "step-title";
+    const label = document.createElement("span");
+    label.textContent = step.title;
+    title.appendChild(label);
+    if (trackMentions && step.mentioned && step.mentioned.length) {
+      const badge = document.createElement("span");
+      badge.className = "badge";
+      badge.textContent = "mentioned";
+      title.appendChild(badge);
+    }
+    row.appendChild(title);
+    if (trackMentions && step.mentioned && step.mentioned.length) {
+      const sig = document.createElement("div");
+      sig.className = "step-sig";
+      sig.textContent = "heard: " + step.mentioned.join(", ");
+      row.appendChild(sig);
+    }
+    body.appendChild(row);
+  }
+  el("plan-count").textContent = plan.length + " steps · read-only";
+  // The legend is load-bearing, not decoration: it is what stops "mentioned" being read as
+  // "covered". P3/G7 does not settle coverage, so this panel does not claim it.
+  el("plan-legend").textContent = trackMentions
+    ? "“Mentioned” means a phrase from the step’s done_signals was literally said. It is not a claim the step was covered — nothing here tracks coverage."
+    : "Plan steps only. Nothing on this panel tracks whether a step was covered.";
+}
+
+/* ---------------- socket ---------------- */
+/* ---------------- controls (#607 single-app switches) ---------------- */
+// The three switches only exist when the server runs in --app mode (hello.controls != null).
+// Every switch POSTs to /control and paints ONLY the state the server confirms back — the same
+// discipline as the meter: the browser derives no switch state of its own, so a failed toggle
+// (e.g. cloud not configured) snaps back instead of lying about what is on.
+let transcriptionOn = false;
+let controlsWired = false;
+
+function initControls(c) {
+  el("controls").hidden = false;
+  if (!controlsWired) { wireControls(); controlsWired = true; }
+  renderControls(c);
+}
+
+function renderControls(c) {
+  transcriptionOn = !!c.transcription;
+  el("sw-transcription").checked = transcriptionOn;
+  el("st-transcription").textContent = transcriptionOn ? "on" : "off";
+
+  el("sw-suggestions").checked = !!c.suggestions;
+  el("st-suggestions").textContent = c.suggestions ? "on" : "off";
+
+  const cloud = c.backend === "cloud";
+  el("sw-backend").checked = cloud;
+  el("st-backend").textContent = cloud ? "local + api" : "local only";
+  // Cloud is a transcript egress (SI1). Grey the switch out when it is not configured, so it
+  // cannot be flipped into a promise the box can't keep.
+  const wrap = el("wrap-backend");
+  if (!c.cloud_available) {
+    wrap.classList.add("disabled");
+    el("sw-backend").disabled = true;
+    el("sw-backend").title = "cloud (local + api) is not configured — set CLOUD_MODEL + CLOUD_API_KEY";
+  } else {
+    wrap.classList.remove("disabled");
+    el("sw-backend").disabled = false;
+    el("sw-backend").title = "";
+  }
+}
+
+function controlMsg(text, cls) {
+  const m = el("control-msg");
+  m.textContent = text || "";
+  m.className = "control-msg" + (cls ? " " + cls : "");
+}
+
+async function postControl(sw, value, onDone) {
+  try {
+    const r = await fetch("/control", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ switch: sw, value: value }),
+    });
+    const data = await r.json();
+    if (!r.ok || data.error) {
+      controlMsg(data.error || ("could not set " + sw), "error");
+      if (data.transcription !== undefined) renderControls(data);   // snap back to server truth
+    } else {
+      renderControls(data);
+      if (onDone) onDone(data);
+    }
+  } catch (e) {
+    controlMsg("could not reach the copilot to set " + sw, "error");
+  }
+}
+
+function wireControls() {
+  el("sw-transcription").addEventListener("change", (e) => {
+    controlMsg(e.target.checked ? "starting capture…" : "stopping capture…");
+    postControl("transcription", e.target.checked,
+      (d) => controlMsg(d.transcription ? "capturing · " + (d.source || "") : "transcription off — audio not captured"));
+  });
+  el("sw-suggestions").addEventListener("change", (e) => {
+    postControl("suggestions", e.target.checked,
+      (d) => controlMsg(d.suggestions ? "" : "suggestions paused — transcript still runs"));
+  });
+  el("sw-backend").addEventListener("change", (e) => {
+    postControl("backend", e.target.checked ? "cloud" : "local",
+      (d) => controlMsg(d.backend === "cloud"
+        ? "⚠ answers use the cloud API — the transcript is sent off this machine"
+        : "answers stay on this machine — no egress",
+        d.backend === "cloud" ? "egress" : ""));
+  });
+}
+
+function connect() {
+  const socket = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
+
+  socket.onopen = () => { lastTick = Date.now(); setConnected(true); };
+
+  socket.onerror = () => setConnected(false, "The connection to the copilot failed — everything below is a frozen snapshot and may already be wrong.");
+
+  socket.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
+    if (msg.kind === "hello") {
+      const i = msg.info;
+      el("run-info").textContent = i.mode + " · " + i.source + " · salience " + i.salience
+        + " · ceiling " + fmt(i.ceiling_seconds) + " s"
+        + (i.suggestions ? "" : " · no suggestions (tail only)");
+      trackMentions = !!msg.track_mentions;
+      for (const line of msg.lines) renderLine(line);
+      renderProvisional(msg.provisional);
+      renderCounters(msg.counters, msg.dropped_lines);
+      renderPlan(msg.plan);
+      if (msg.suggestion) renderSuggestion(msg.suggestion);
+      renderHistory(msg.history);
+      if (msg.controls) initControls(msg.controls);
+      if (msg.meter) renderMeter(msg.meter);
+      lastTick = Date.now();
+      setConnected(true);
+    } else if (msg.kind === "controls") {
+      renderControls(msg);
+    } else if (msg.kind === "tick") {
+      lastTick = Date.now();
+      setConnected(true);
+      renderMeter(msg.meter);
+      renderAge(msg.suggestion_age);
+    } else if (msg.kind === "line") {
+      renderLine(msg.line);
+      renderCounters(msg.counters, msg.dropped_lines);
+    } else if (msg.kind === "provisional") {
+      // Null clears the slot. It arrives AFTER the "line" event that superseded it, so the
+      // replacement is already on screen before the provisional text is taken down.
+      renderProvisional(msg.provisional);
+      renderCounters(msg.counters, 0);
+    } else if (msg.kind === "counters") {
+      renderCounters(msg.counters, 0);
+    } else if (msg.kind === "plan") {
+      renderPlan(msg.plan);
+    } else if (msg.kind === "suggestion") {
+      renderSuggestion(msg.suggestion);
+    } else if (msg.kind === "history") {
+      renderHistory(msg.history);
+    } else if (msg.kind === "suggestion_token") {
+      if (suggestionTextEl && msg.id === currentSuggestionId) {
+        suggestionRaw += msg.text;
+        formatSuggestion(suggestionTextEl, suggestionRaw);
+      }
+    } else if (msg.kind === "worker_dead") {
+      setConnected(false, "The transcript reader stopped. No new lines will arrive — everything below is frozen.");
+    }
+  };
+
+  socket.onclose = () => {
+    setConnected(false, "The connection to the copilot closed — everything below is a frozen snapshot and may already be wrong. Reconnecting…");
+    setTimeout(connect, 1000);
+  };
+}
+
+// A silent socket is indistinguishable from a calm interview, so treat missing ticks as
+// disconnection rather than as quiet.
+setInterval(() => {
+  if (lastTick && Date.now() - lastTick > TICK_GRACE_MS) {
+    setConnected(false, "No update from the copilot for over 2 seconds — the meter below has stopped and may already be wrong.");
+  }
+}, 500);
+
+initHistoryToggle();
+connect();
+</script>
+</body>
+</html>

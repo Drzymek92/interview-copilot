@@ -1,0 +1,16 @@
+[Desktop Entry]
+# Template desktop launcher. Copy to ~/.local/share/applications/interview-copilot.desktop and
+# replace __PROJECT_DIR__ with the absolute path to your clone, e.g.:
+#   sed "s|__PROJECT_DIR__|$PWD|g" interview-copilot.desktop.template \
+#     > ~/.local/share/applications/interview-copilot.desktop
+# Then mark it trusted (right-click ▸ Allow Launching, or `gio set ... metadata::trusted true`).
+# To load a specific session bundle, set COPILOT_SESSION in the Exec line (see SETUP.md).
+Type=Application
+Version=1.0
+Name=Interview Copilot
+Comment=Disclosed live AI interview copilot — transcript, suggestions, meter (loopback only)
+Exec=__PROJECT_DIR__/scripts/launch_copilot.sh
+Path=__PROJECT_DIR__
+Terminal=true
+Categories=Utility;
+StartupWMClass=interview-copilot

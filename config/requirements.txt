@@ -1,0 +1,45 @@
+# interview_copilot — pinned dependencies (Day-1 STT pipeline + capture spike)
+# Interpreter: Python 3.11+. Install: pip install -r requirements.txt
+#
+# NOTE ON NATIVE DEPS (not pip-installable):
+#   * sounddevice needs the PortAudio C library (libportaudio2). On the lab it was
+#     provided user-space via:  conda install --override-channels -c conda-forge portaudio
+#     (apt equivalent: sudo apt install libportaudio2 portaudio19-dev)
+#   * spike_capture.py enumerates PipeWire/Pulse monitor sources via `pactl`, which comes
+#     from the `pulseaudio-utils` apt package:  sudo apt install pulseaudio-utils
+#     (this is a USER step — the agent sandbox has no audio server and cannot sudo).
+
+# --- Speech-to-text (local GPU, D16) ---
+faster-whisper==1.2.1        # ctranslate2 Whisper; loads on device=cuda
+ctranslate2==4.8.1           # faster-whisper inference backend (pinned transitively)
+av==18.1.0                   # audio decoding for faster-whisper
+onnxruntime==1.29.0          # faster-whisper built-in Silero VAD
+tokenizers==0.23.1           # faster-whisper transitive
+
+# --- Audio capture (D17 — PipeWire/Pulse monitor + mic) ---
+sounddevice==0.5.6           # PortAudio bindings; needs native libportaudio2 (see note)
+webrtcvad==2.0.10            # frame-level voice-activity detection for the capture loop
+
+# --- Local web dashboard (D18 — added Day-1 so Day-3 imports are pinned) ---
+fastapi==0.141.1
+uvicorn==0.52.4
+starlette==1.6.0             # fastapi transitive (websocket support)
+# uvicorn ships NO websocket implementation of its own — without one it accepts /ws and then
+# closes it, which would look exactly like a dead dashboard. Pinned here rather than left to
+# whatever the environment happens to have, because D18's transcript stream IS the websocket.
+# This is the transport for a decision already taken, not a new frontend dependency: the UI
+# itself is hand-written HTML with no library, no CDN and no webfont (SI1 — a font request from
+# a page rendering an interview transcript is an egress).
+websockets==16.1
+
+# --- Reasoning (D14 — wired in 2026-09-01, subtask #321) ---
+# The LOCAL backend is an OpenAI-compatible endpoint (Ollama) driven through langchain_openai,
+# so it imports no vendor SDK (CLAUDE.md / skills/llm_connection.md). The CLOUD backend cannot
+# be — Claude has no OpenAI-compatible endpoint — so it uses `anthropic` under a Policy Override.
+# Pins are the versions this project was last resolved against; re-resolve for your platform if needed.
+langchain-openai==1.3.5
+langchain-core==1.4.9
+openai==2.45.0               # langchain-openai transitive; the HTTP client underneath
+python-dotenv==1.2.1         # config/.env loading in scripts/llm_client.py
+anthropic==1.1.0             # cloud backend ONLY (Claude has no OpenAI-compatible endpoint);
+                             # see the Policy Override in agent/project.md
