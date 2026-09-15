@@ -13,9 +13,9 @@ If you only want to run the **tests / code** (no audio, no model), jump to
 
 | Need | Why | Notes |
 |---|---|---|
-| **Linux** with PipeWire or PulseAudio | audio is captured at the OS layer with `parec` | Built and tested on Ubuntu. The capture path is Linux-specific. |
-| **NVIDIA GPU + CUDA** | local `faster-whisper` (STT) and the local LLM run on the GPU | ~16 GB VRAM comfortably runs Whisper + the 14B model together; 8 GB works with the 8b model. CPU is possible for STT but slow. |
-| **Ollama** | the local, private LLM backend (the default) | https://ollama.com/download |
+| **Linux, Windows, or macOS** | live audio capture | Linux: `parec` (PulseAudio/PipeWire). Windows: WASAPI loopback, built in. macOS: needs a virtual loopback device (free [BlackHole](https://github.com/ExistentialAudio/BlackHole)) for the interviewer's side. See [Audio capture by OS](#audio-capture-by-os). Best-tested on Ubuntu. |
+| **A GPU helps** | local `faster-whisper` (STT) and the local LLM | NVIDIA + CUDA on Linux/Windows is ideal (~16 GB VRAM runs Whisper + the 14B model; 8 GB works with the 8b). **macOS runs STT on CPU** (no CUDA/Metal in ctranslate2) — usable with `large-v3-turbo`, just slower. Ollama uses Metal on Apple Silicon. |
+| **Ollama** | the local, private LLM backend (the default) | Native on Linux/Windows/macOS — https://ollama.com/download |
 | **Python 3.11+** | the app | 3.13 is what CI runs. |
 | **~15 GB disk** | model weights (Whisper + one or two Ollama models) | |
 | A **headset** (headphones) | keeps the interviewer and your mic on separate channels | On speakers, the mic hears the interviewer and speaker attribution degrades. |
@@ -28,15 +28,37 @@ If you only want to run the **tests / code** (no audio, no model), jump to
 
 ## 1. System packages
 
+**Linux** (the `parec` backend):
 ```bash
-# audio: parec (capture) + pactl (list sources), and the native PortAudio lib sounddevice needs
+# parec (capture) + pactl (list sources), and the native PortAudio lib the fallback backend needs
 sudo apt update
 sudo apt install -y pulseaudio-utils libportaudio2 portaudio19-dev
 ```
-
 If you run Microsoft Teams, the **`teams-for-linux`** flatpak works because its sandbox shares the
 audio server; a browser tab in the same PipeWire graph works too. What matters is that Teams' output
 appears as a **monitor source** you can capture (step 5).
+
+**Windows** — nothing to install: the `sounddevice` backend uses **WASAPI loopback**, which is built
+into Windows. (`sounddevice` ships its own PortAudio in the wheel.)
+
+**macOS** — install a virtual loopback device so the app can hear the *other* side of the call
+(macOS has no built-in loopback):
+```bash
+brew install blackhole-2ch          # or download from the BlackHole releases page
+```
+Then create a **Multi-Output Device** (Audio MIDI Setup) that plays to both your speakers/headphones
+**and** BlackHole, and set your meeting app's output to it — so you still hear the call while the app
+captures it. See [Audio capture by OS](#audio-capture-by-os).
+
+### Audio capture by OS
+
+| OS | Backend (auto) | Interviewer audio (`--source`) | Your mic (`--mic`) |
+|---|---|---|---|
+| Linux | `parec` | a PulseAudio/PipeWire **`.monitor`** source | an input source |
+| Windows | `sounddevice` | **WASAPI loopback** of your output device (auto-detected) | an input device |
+| macOS | `sounddevice` | a **BlackHole** (virtual) input device you route the call into | the built-in/USB mic |
+
+Force a backend with `COPILOT_AUDIO_BACKEND=parec|sounddevice` if auto-detection picks wrong.
 
 ## 2. Ollama + the custom models
 
@@ -66,7 +88,8 @@ The GPU is shared between Ollama and Whisper — run `ollama ps` before a call.
 ```bash
 git clone https://github.com/Drzymek92/interview-copilot.git
 cd interview-copilot
-python -m venv .venv && source .venv/bin/activate
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
@@ -100,14 +123,20 @@ python scripts/llm_client.py --smoke
 python scripts/live_transcribe.py --list
 ```
 
-You need two device names:
-- the **monitor** of the sink Teams plays into (the interviewer's audio), and
-- your **microphone**.
+This prints the sources for your OS's backend (PulseAudio monitors on Linux, PortAudio devices on
+Windows/macOS) and its best guess for `auto --source` / `auto --mic`. You need two:
+- the **interviewer's audio** — a `.monitor` source (Linux), the WASAPI loopback of your output
+  device (Windows, auto), or your **BlackHole** device (macOS); pass it as `--source`.
+- your **microphone** — pass it as `--mic`.
+
+On Windows/macOS a device can be given by its **index** (the `[N]` in the list) or a **name
+substring**.
 
 > **Gotcha:** `--mic auto` resolves the system *default* input, which is often a webcam mic rather
 > than your good USB mic. Pass `--mic` explicitly (or set `COPILOT_MIC`).
 
-Prove capture → STT works with no call, using a sink monitor as a fake mic:
+**Linux only** — prove capture → STT works with no call, playing a WAV into a sink and capturing its
+monitor:
 
 ```bash
 python scripts/spike_capture.py --selftest-sink <your-sink-monitor> --seconds 8

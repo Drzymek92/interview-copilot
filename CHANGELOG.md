@@ -10,9 +10,14 @@ capability milestone rather than by semantic version.
 ## Milestones
 
 ### Capture & transcription
-- **Live transcript loop** (`live_transcribe.py`): PipeWire/Pulse monitor + mic captured as two
-  channels via `parec`, segmented with `webrtcvad` + an adaptive per-channel noise floor
-  (`ChannelGate`), decoded on local GPU `faster-whisper`. Proven end-to-end on real call audio.
+- **Live transcript loop** (`live_transcribe.py`): monitor + mic captured as two channels,
+  segmented with `webrtcvad` + an adaptive per-channel noise floor (`ChannelGate`), decoded on local
+  `faster-whisper`. Proven end-to-end on real call audio (Linux).
+- **Cross-platform capture** (`audio_backend.py`): a pluggable backend auto-selected per OS — `parec`
+  on Linux, `sounddevice`/PortAudio **WASAPI loopback** on Windows, `sounddevice` + a virtual
+  loopback device (e.g. BlackHole) on macOS. Everything above the backend consumes the same fixed
+  int16 mono 16 kHz frames, so segmentation/STT are unchanged. The Windows/macOS paths are
+  unit-tested (mixdown/resample/framing/selection) but not yet hardware-verified.
 - **VAD-pause segmentation, not a fixed clock** (D21): segments end on a natural pause, which
   measured markedly better than fixed windows (fixed cuts bisect phrases and starve short windows).
 - **Per-segment language detection biased to Polish** (D16): English questions stay English and get
@@ -60,7 +65,8 @@ capability milestone rather than by semantic version.
   of the measure-before-changing discipline.
 
 ## Known limitations
-- Linux-only capture path (PipeWire/PulseAudio); a single shared GPU.
+- Capture runs on Linux/Windows/macOS, but only Linux is hardware-verified; macOS needs a virtual
+  loopback device for the interviewer's side and runs STT on CPU. A single shared GPU on Linux/Windows.
 - Accuracy on spontaneous speech is characterised by divergence, not a validated WER.
 - The plan panel tracks literal `done_signals` mentions only — it does not infer "covered".
 - Usability mid-answer (does a live suggestion actually help a human under pressure?) is the open

@@ -123,6 +123,11 @@ SUGGESTION_LANGUAGE: str = os.environ.get("SUGGESTION_LANGUAGE", "match")  # "ma
 SAMPLE_RATE: int = int(os.environ.get("SAMPLE_RATE", "16000"))
 CHANNELS: int = int(os.environ.get("CHANNELS", "1"))
 
+# Capture backend (cross-platform). "auto" = parec on Linux, sounddevice/PortAudio on
+# Windows (WASAPI loopback) and macOS (a virtual loopback device such as BlackHole). Force one
+# with COPILOT_AUDIO_BACKEND. See scripts/audio_backend.py and SETUP.md.
+AUDIO_BACKEND: str = os.environ.get("COPILOT_AUDIO_BACKEND", "auto")  # "auto" | "parec" | "sounddevice"
+
 # --- Live segmentation (scripts/live_transcribe.py) ---
 # MEASURED CONSTRAINT (2026-08-31, same audio): window length drives accuracy —
 #   60s -> 3.8% WER / 10-10 technical terms · 15s -> 5.7% / 9-10 · 8s -> 7.6% / 8-10.

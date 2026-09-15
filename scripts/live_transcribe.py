@@ -62,7 +62,6 @@ import csv
 import json
 import os
 import queue
-import shutil
 import signal
 import subprocess
 import sys
@@ -80,6 +79,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from config import settings  # noqa: E402
 from scripts.logger import get_logger  # noqa: E402
+from scripts import audio_backend  # noqa: E402
 
 logger = get_logger("live_transcribe")
 
@@ -89,103 +89,26 @@ RUNS_CSV = PROJECT_ROOT / "logs" / "runs.csv"
 
 
 # --------------------------------------------------------------------------
-# Source discovery (pactl)
+# Capture backend — parec on Linux, sounddevice (PortAudio) on Windows/macOS.
+# Everything below consumes fixed int16 mono 16 kHz frames; the backend produces them.
 # --------------------------------------------------------------------------
-def _pactl(*args: str) -> str:
-    return subprocess.run(
-        ["pactl", *args], check=True, capture_output=True, text=True
-    ).stdout.strip()
+BACKEND = audio_backend.select_backend(settings.AUDIO_BACKEND)
 
 
 def source_names() -> list[str]:
-    return [ln.split("\t")[1] for ln in _pactl("list", "short", "sources").splitlines() if "\t" in ln]
+    return BACKEND.source_names()
 
 
 def default_monitor() -> str | None:
-    """`.monitor` of the default sink — what the other person's voice comes out of."""
-    try:
-        sink = _pactl("get-default-sink")
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return None
-    monitor = f"{sink}.monitor"
-    return monitor if monitor in source_names() else None
+    return BACKEND.default_monitor()
 
 
 def default_mic() -> str | None:
-    """Default input source, unless the default input IS a monitor (then there is no mic)."""
-    try:
-        src = _pactl("get-default-source")
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return None
-    if src.endswith(".monitor") or src not in source_names():
-        return None
-    return src
+    return BACKEND.default_mic()
 
 
 def list_sources() -> None:
-    if shutil.which("pactl") is None:
-        print("pactl not found — sudo apt install pulseaudio-utils (USER step)")
-        return
-    print("=== capture sources (pactl) ===")
-    for line in _pactl("list", "short", "sources").splitlines():
-        tag = "   <-- MONITOR (the other person's voice)" if ".monitor" in line else ""
-        print(f"  {line}{tag}")
-    print(f"\nauto --source : {default_monitor()}")
-    print(f"auto --mic    : {default_mic()}")
-
-
-# --------------------------------------------------------------------------
-# Capture
-# --------------------------------------------------------------------------
-class ParecStream:
-    """One `parec` capture stream. Never fatal: a dead stream degrades to silence.
-
-    A capture tool that dies mid-call is worse than one that records half a
-    conversation, so every failure here is a warning plus silent frames.
-    """
-
-    def __init__(self, source: str, frame_bytes: int, label: str) -> None:
-        self.source = source
-        self.label = label
-        self.frame_bytes = frame_bytes
-        self.dead = False
-        cmd = [
-            "parec",
-            f"--device={source}",
-            "--format=s16le",
-            f"--rate={settings.SAMPLE_RATE}",
-            "--channels=1",
-            "--raw",
-        ]
-        logger.info("%s: parec --device=%s", label, source)
-        self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-    def read(self) -> bytes:
-        """Exactly one frame; silence (never short) once the stream is gone."""
-        if self.dead:
-            return b"\x00" * self.frame_bytes
-        assert self.proc.stdout is not None
-        data = self.proc.stdout.read(self.frame_bytes)
-        if not data or len(data) < self.frame_bytes:
-            err = (self.proc.stderr.read().decode(errors="replace") if self.proc.stderr else "").strip()
-            logger.warning("%s: stream ended (%s) — continuing with silence", self.label, err or "eof")
-            self.dead = True
-            return b"\x00" * self.frame_bytes
-        return data
-
-    def close(self) -> None:
-        if self.proc.poll() is None:
-            self.proc.terminate()
-            try:
-                self.proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                logger.warning("%s: parec ignored SIGTERM — killing", self.label)
-                self.proc.kill()
-                self.proc.wait(timeout=3)
-        for pipe in (self.proc.stdout, self.proc.stderr):
-            if pipe is not None:
-                pipe.close()
-        logger.info("%s: parec stopped (rc=%s)", self.label, self.proc.returncode)
+    BACKEND.print_sources()
 
 
 def mix(remote: bytes, mic: bytes | None) -> bytes:
@@ -937,14 +860,15 @@ def run_loop(args: argparse.Namespace) -> int:
         wav_input = decode_audio(args.from_wav, sampling_rate=settings.SAMPLE_RATE)
         remote_name = f"file:{Path(args.from_wav).name}"
     else:
-        if shutil.which("parec") is None:
-            logger.error("parec not found — sudo apt install pulseaudio-utils (USER step)")
+        ok, hint = BACKEND.available()
+        if not ok:
+            logger.error(hint)
             return 2
         remote_name = args.source if args.source != "auto" else default_monitor()
         if not remote_name:
-            logger.error("could not resolve a monitor source — run --list and pass --source")
+            logger.error("could not resolve a monitor / system-audio source — run --list and pass --source")
             return 2
-        if remote_name not in source_names():
+        if BACKEND.name == "parec" and remote_name not in source_names():
             logger.error("source %r is not in `pactl list short sources` — run --list", remote_name)
             return 2
         if not args.no_mic:
@@ -1033,24 +957,21 @@ def run_loop(args: argparse.Namespace) -> int:
     )
     worker.start()
 
-    streams: list[ParecStream] = []
+    streams: list[audio_backend.CaptureStream] = []
     player: subprocess.Popen | None = None
     frames_seen = 0
     status = "ok"
     drift_monitor = CaptureDriftMonitor()
     try:
         if args.selftest_sink:
-            player = subprocess.Popen(
-                ["paplay", f"--device={args.selftest_sink}", args.selftest_wav],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-            )
-            logger.info("self-test: playing %s into sink %s", args.selftest_wav, args.selftest_sink)
+            player = BACKEND.play_into_sink(args.selftest_sink, args.selftest_wav)
+            if player is not None:
+                logger.info("self-test: playing %s into sink %s", args.selftest_wav, args.selftest_sink)
 
         if wav_input is None:
-            streams.append(ParecStream(remote_name, frame_bytes, "remote"))
+            streams.append(BACKEND.open_stream(remote_name, frame_bytes, "remote"))
             if mic_name:
-                streams.append(ParecStream(mic_name, frame_bytes, "mic"))
+                streams.append(BACKEND.open_stream(mic_name, frame_bytes, "mic"))
 
         # Show the resolved sources: `auto` picks the DEFAULT input, which on this box
         # is the webcam mic, not your external mic. Check this line before the call starts.
