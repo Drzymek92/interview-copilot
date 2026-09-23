@@ -241,7 +241,13 @@ REASONING_BACKEND: str = os.environ.get("REASONING_BACKEND", "local")  # "local"
 #   model                   TTFT     total   out   tok/s   VRAM    + Whisper (2.2 GB)
 #   interview-copilot:8b    0.14s    3.33s   216    67.5   6.9 GB   9.2 / 15.9  OK
 #   interview-copilot:14b   0.15s    5.86s   220    38.5  11.5 GB  13.8 / 15.9  OK  <- CHOSEN
-#   (measured live E2E with Whisper actually resident: peak 11.7 GB of 15.9)
+#   (CORRECTED 2026-09-23 — independently re-measured with a VRAM probe on the reference
+#    machine (RTX 5060 Ti, 15.9 GB usable), cold, with BOTH models actually resident: peak
+#    13.3 GB of 15.9, decomposing as 11.2 GB model + 2.2 GB Whisper large-v3-turbo
+#    (float16, beam 5 — the shipped STT_* settings). This SUPERSEDES an earlier "11.7 GB"
+#    note that stood here and contradicted both this table's own 13.8 and the ~2.1 GB
+#    headroom figure below. The real slack is ~2.6 GB, not ~4.2 — and that is the number the
+#    "what breaks mid-call" reasoning below depends on.)
 #
 # WHY THE BIGGER MODEL IS NOW THE RIGHT CHOICE — the reasoning inverted twice, so read this
 # before "optimising" it back:

@@ -7,6 +7,21 @@ for public readers; the *why* behind each design choice lives in
 The project is a personal / portfolio build, not a versioned release product, so this is grouped by
 capability milestone rather than by semantic version.
 
+## Corrections
+
+- **2026-09-23 — local-model VRAM figure corrected (`config/settings.py`).** The comment block
+  above `LOCAL_MODEL` claimed a live end-to-end peak of *11.7 GB of 15.9* with Whisper resident.
+  That contradicted its own table two lines above (`interview-copilot:14b … 11.5 GB → 13.8 / 15.9`)
+  and the `~2.1 GB headroom` note below it. Re-measured independently on the reference machine
+  (RTX 5060 Ti, 15.9 GB usable) with a VRAM probe — cold, card cleared first — running the real
+  live shape with Whisper `large-v3-turbo` held resident while the 14B generates: **peak 13.3 GB
+  of 15.9**. Two further probes decompose it as **11.2 GB** for the 14B alone (44.7 tok/s, 3.5 s
+  cold start) and **2.2 GB** for Whisper alone, which sum to 13.4 and corroborate the end-to-end
+  figure rather than merely asserting it.
+  **Practical effect:** running the 14B leaves about **2.6 GB** spare on a 16 GB card, not ~4.2 GB.
+  The advice is unchanged — if something else claims VRAM mid-call, fall back with
+  `--model interview-copilot:8b`. Comment only: no code, configuration value or behaviour changed.
+
 ## Milestones
 
 ### Capture & transcription
