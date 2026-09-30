@@ -24,7 +24,7 @@ default, and only for interviews that permit AI assistance.
 
 ```
 Teams audio (monitor + mic)
-   │  parec (PipeWire monitor + mic), two channels
+   │  audio_backend: monitor + mic, two channels (parec / WASAPI loopback / virtual device)
    ▼
 live_transcribe.py  ── VAD segmentation (webrtcvad + adaptive ChannelGate, per channel)
    │                    → faster-whisper (local GPU), per-segment language biased to Polish
@@ -43,19 +43,28 @@ LLM/STT is explicitly selected. Privacy is a design invariant (`design/SECURITY_
 
 ## Stack
 
-- Python 3.11+ · `faster-whisper` (CUDA) · `webrtcvad` · `parec` (pulseaudio-utils) on PipeWire
+- Python 3.11+ · `faster-whisper` · `webrtcvad` · cross-platform capture (Linux `parec`, Windows
+  WASAPI loopback, macOS via a virtual device) through a pluggable `audio_backend`
 - LLM via `langchain_openai` over an OpenAI-compatible endpoint — local **Ollama** default
   (`interview-copilot:8b/14b`), BYOK cloud (Claude) opt-in and announced
 - FastAPI + websocket dashboard, hand-written UI (no CDN, no webfont — SI1)
 
+## Platforms
+
+Runs on **Linux, Windows, and macOS**. The whole pipeline except live capture is portable, and the
+capture layer auto-selects a backend per OS (`parec` on Linux, `sounddevice`/WASAPI loopback on
+Windows, `sounddevice` + a virtual loopback device such as BlackHole on macOS). Linux is the
+best-tested path; the Windows/macOS capture backends are implemented and unit-tested but you should
+verify real capture on your machine. STT uses the GPU on Linux/Windows (CUDA) and CPU on macOS.
+
 ## Setup
 
-This has real external dependencies — an NVIDIA GPU, Ollama with a custom-context model, and a
-Linux audio stack — so the full walkthrough is in **[SETUP.md](SETUP.md)**. The short version:
-install `pulseaudio-utils` + `libportaudio2`, install [Ollama](https://ollama.com) and run
-`./ollama/build_models.sh`, then `pip install -r requirements.txt` and `cp config/.env.example
-config/.env`. To just run the code/tests (no GPU, no audio), see
-[Code-only setup](SETUP.md#code-only-setup-no-gpu-no-audio).
+Real external dependencies — a GPU (recommended), Ollama with a custom-context model, and an OS
+audio backend — so the full, per-OS walkthrough is in **[SETUP.md](SETUP.md)**. The short version:
+set up audio for your OS (see [Audio capture by OS](SETUP.md#audio-capture-by-os)), install
+[Ollama](https://ollama.com) and run `./ollama/build_models.sh`, then `pip install -r
+requirements.txt` and `cp config/.env.example config/.env`. To just run the code/tests (no GPU, no
+audio), see [Code-only setup](SETUP.md#code-only-setup-no-gpu-no-audio).
 
 ## Quickstart
 
@@ -73,9 +82,11 @@ python scripts/reasoning.py --session example_ai_engineer --text "Tell me about 
 # is the LLM backend alive?
 python scripts/llm_client.py --smoke
 
-# list audio sources, then run the dashboard you actually interview on (single-app mode)
+# list audio sources, then open the hub: menu → Start a call · Train · Review · Generate · Settings
 python scripts/live_transcribe.py --list
-python scripts/dashboard.py --app --session example_ai_engineer   # → http://127.0.0.1:8765
+python scripts/app_hub.py                                          # opens the menu in your browser
+python scripts/app_hub.py --open-path "/call?session=example_ai_engineer"   # straight to a call
+# (Linux) scripts/launch_copilot.sh does the same and is what the desktop shortcut runs
 
 # tests / lint  (model/live tests self-skip when Ollama is unreachable)
 pytest tests/ ; ruff check .
@@ -84,7 +95,7 @@ pytest tests/ ; ruff check .
 ## Governance & design docs
 
 Built with a lightweight in-house **design + decision OS**: every locked decision is stated once in
-[`design/DECISIONS.md`](design/DECISIONS.md) (`D1`–`D28`) and other docs cite it rather than
+[`design/DECISIONS.md`](design/DECISIONS.md) (`D1`–`D37`) and other docs cite it rather than
 restating it. Open questions and design tensions are in
 [`design/OPEN_DESIGN.md`](design/OPEN_DESIGN.md), the security invariants in
 [`design/SECURITY_INVARIANTS.md`](design/SECURITY_INVARIANTS.md), and a worked measurement study in
@@ -100,7 +111,7 @@ to internal tooling or absent files (`decision_tools.py`, `ROUTINE_*`, `INDEX.md
 
 Capture + STT are proven end-to-end on real Teams audio; the live transcript loop, reasoning layer,
 salience gate, code-switch repair (D26), provisional lines (D25), and the dashboard with its
-bounded-wait meter (D27) are all built. The current open items are the mock/technical-round usability
+bounded-wait meter (D27) are all built. Since then: one **hub** process with an opening menu and per-mode views (D35), UI-saved settings (D36), an **offline practice track** — a mock-interview trainer plus JD/CV/PDF → context-bundle generation (D29–D31, D37) — and **live Q&A capture with a post-interview review** (D32–D34). Audio capture is pluggable across Linux / Windows / macOS (`scripts/audio_backend.py`); the Settings device pickers are still Linux-only. The current open items are the mock/technical-round usability
 test (does any of this help a human mid-answer?) and a human-referenced accuracy pass. See
 [CHANGELOG.md](CHANGELOG.md) for the capability history and
 [`design/OPEN_DESIGN.md`](design/OPEN_DESIGN.md) for the open questions.

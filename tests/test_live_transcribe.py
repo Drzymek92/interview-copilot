@@ -151,6 +151,17 @@ def _run_loop_args(**over):
     return argparse.Namespace(**base)
 
 
+class _FakeBackend:
+    """Stands in for audio_backend's selected backend: always available, streams are dead."""
+    name = "fake"
+
+    def available(self):
+        return True, ""
+
+    def open_stream(self, source, frame_bytes, label):
+        return _DeadStream(source, frame_bytes, label)
+
+
 def _patch_capture_env(monkeypatch, tmp_path, *, monitor_raises=False):
     import scripts.stt as stt
     monkeypatch.setattr(lt, "OUTPUT_DIR", tmp_path)
@@ -158,11 +169,10 @@ def _patch_capture_env(monkeypatch, tmp_path, *, monitor_raises=False):
     # so the test's out-of-tree OUTPUT_DIR does not trip that display line.
     monkeypatch.setattr(lt, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(lt, "RUNS_CSV", tmp_path / "runs.csv")
-    monkeypatch.setattr(lt.shutil, "which", lambda name: "/usr/bin/parec")
     monkeypatch.setattr(lt, "source_names", lambda: ["mic.src"])
     monkeypatch.setattr(lt, "default_mic", lambda: "mic.src")
     monkeypatch.setattr(stt, "Transcriber", _NullTranscriber)
-    monkeypatch.setattr(lt, "ParecStream", _DeadStream)
+    monkeypatch.setattr(lt, "BACKEND", _FakeBackend())
 
     def _monitor():
         if monitor_raises:
