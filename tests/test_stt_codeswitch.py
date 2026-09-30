@@ -104,6 +104,7 @@ def _transcriber(model: _FakeModel) -> stt.Transcriber:
     t = stt.Transcriber.__new__(stt.Transcriber)
     t.model = model
     t.model_name, t.device, t.compute_type = "fake", "cpu", "int8"
+    t.hotwords = ""  # #324 knob default (off) — these tests reason about codeswitch, not hotwords
     return t
 
 

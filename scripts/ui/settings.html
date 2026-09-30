@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#12151b">
+<title>Settings — Interview copilot</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="/">← Menu</a>
+  <h1>Settings</h1>
+  <span class="sep">·</span>
+  <span class="disclosure-tag">Disclosed AI assistance (D11)</span>
+  <span class="sep">·</span>
+  <span class="meta">Local only — <code translate="no">127.0.0.1</code></span>
+</header>
+
+<div class="page">
+  <main class="wide">
+    <p class="page-title">Settings</p>
+    <p class="page-lede">Saved to <code id="file">config/user_settings.json</code> on this machine. An environment variable always
+      wins over a saved value (🔒). Changes apply the next time a call or training session starts.
+      The address the app listens on can't be changed here: it only ever listens on this machine.</p>
+    <div class="split settings-split">
+      <nav class="settings-nav" id="nav" aria-label="Setting groups"></nav>
+      <div id="groups"></div>
+    </div>
+  </main>
+</div>
+
+<script src="/static/common.js"></script>
+<script>
+"use strict";
+const ORDER = ["general", "call", "train", "review", "generate"];
+const BLURB = {
+  general: "Devices, models and languages shared by every mode.",
+  call: "How the live copilot behaves during a real interview.",
+  train: "The mock-interview trainer.",
+  review: "Grading a captured interview.",
+  generate: "Turning a job description into a context bundle.",
+};
+async function paint(knobs, message, focusGroup) {
+  if (!knobs) {
+    const r = await api("/api/config");
+    if (!r.ok) { el("groups").textContent = r.data.error || "could not load settings"; return; }
+    knobs = r.data.knobs;
+    el("file").textContent = r.data.file;
+    window.GROUPS = r.data.groups;
+  }
+  const nav = el("nav"), groups = el("groups");
+  nav.textContent = ""; groups.textContent = "";
+  for (const g of ORDER) {
+    const list = knobs.filter((k) => k.groups.includes(g));
+    if (!list.length) continue;
+    nav.appendChild(h("a", { href: "#g-" + g, text: window.GROUPS[g] }));
+    const form = h("div");
+    const sec = h("section", { class: "settings-group card", id: "g-" + g, "aria-labelledby": "gh-" + g },
+      h("h2", { id: "gh-" + g, text: window.GROUPS[g] }),
+      h("p", { class: "knob-help", style: "margin:2px 0 4px", text: BLURB[g] }), form);
+    groups.appendChild(sec);
+    renderSettingsForm(form, list, {
+      onSaved: (k2, msg) => paint(k2, msg, g),
+      message: focusGroup === g ? message : "",
+    });
+  }
+}
+loadDevices().then(() => paint());
+</script>
+</body>
+</html>

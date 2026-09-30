@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#12151b">
+<title>Review — Interview copilot</title>
+<link rel="stylesheet" href="/static/app.css">
+<!-- D35 Review view — D32/D33 post-interview review: grade the captured question↔answer pairs of a
+     real interview against the CV + JD, or read an earlier report. Local by default (SI1). -->
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="/">← Menu</a>
+  <h1>Review</h1>
+  <span class="sep">·</span>
+  <span class="disclosure-tag">Disclosed AI assistance (D11)</span>
+  <span class="sep">·</span>
+  <span class="meta">Local only — <code translate="no">127.0.0.1</code></span>
+  <span class="spacer"></span>
+  <button type="button" class="btn small ghost gear" id="gear">⚙ Review settings</button>
+</header>
+
+<div class="page">
+  <main class="wide">
+    <p class="page-title">Review a call</p>
+    <p class="page-lede">During a call the copilot saves each real interviewer question with the answer you gave. Pick one to grade it against your CV and the job, or open an earlier report.</p>
+    <div class="split">
+      <div>
+        <h2 class="list-h">Captured interviews</h2>
+        <div class="list" id="interviews"></div>
+        <h2 class="list-h">Reports</h2>
+        <div class="list" id="reports"></div>
+      </div>
+      <div id="detail">
+        <div class="card"><p class="empty" id="detail-empty">Pick a captured interview on the left to grade it, or a report to read it.</p></div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script src="/static/common.js"></script>
+<script>
+"use strict";
+initSettingsDrawer(el("gear"), "review", "Review settings");
+let DATA = { interviews: [], reports: [] }, selected = null, stopPoll = null;
+
+async function load() {
+  const [iv] = await Promise.all([api("/api/interviews"), loadSessions(document.createElement("select"))]);
+  DATA = iv.data || DATA;
+  paintLists();
+}
+function paintLists() {
+  const box = el("interviews");
+  box.textContent = "";
+  if (!DATA.interviews.length) {
+    box.appendChild(h("p", { class: "empty" }, "None yet. Captured interviews appear here after a call in which the interviewer asked real questions. ",
+      h("a", { href: "/call", text: "Start a call" }), "."));
+  }
+  for (const i of DATA.interviews) {
+    const btn = h("button", { type: "button", class: "list-item" + (selected && selected.name === i.name ? " selected" : ""),
+      onclick: () => selectInterview(i) },
+      h("div", { class: "li-title" }, h("span", { text: stampLabel(i.stamp) }),
+        i.reports.length ? h("span", { class: "badge ok", text: "reviewed" }) : null),
+      h("div", { class: "li-meta", text: i.answered + " of " + i.pairs + " question" + (i.pairs === 1 ? "" : "s") + " answered" + (i.session ? " · " + i.session : "") }));
+    box.appendChild(btn);
+  }
+  const rb = el("reports");
+  rb.textContent = "";
+  if (!DATA.reports.length) rb.appendChild(h("p", { class: "empty", text: "No reports yet." }));
+  for (const r of DATA.reports) {
+    rb.appendChild(h("button", { type: "button", class: "list-item" + (selected && selected.report === r.name ? " selected" : ""),
+      onclick: () => selectReport(r) },
+      h("div", { class: "li-title" }, h("span", { text: r.kind === "review" ? "Interview review" : "Practice scorecard" }),
+        h("span", { class: "badge", text: r.kind })),
+      h("div", { class: "li-meta", text: r.modified.replace("T", " ") })));
+  }
+}
+
+function selectInterview(i) {
+  if (stopPoll) { stopPoll(); stopPoll = null; }
+  selected = { name: i.name };
+  paintLists();
+  const d = el("detail");
+  d.textContent = "";
+  const select = h("select", { id: "bundle" });
+  const sum = h("div", { class: "bundle-sum" });
+  const msg = h("span", { class: "msg", role: "status" });
+  const go = h("button", { type: "button", class: "btn primary big", text: i.reports.length ? "Grade again" : "Grade this interview" });
+  const out = h("div", { style: "margin-top:18px" });
+  const knobs = window.REVIEW_KNOBS || {};
+  d.append(h("div", { class: "card setup" },
+    h("div", {}, h("h3", { text: "Interview of " + stampLabel(i.stamp) }),
+      h("div", { class: "dim", style: "font-size:13.5px", text: i.pairs + " question" + (i.pairs === 1 ? "" : "s") + " captured, " + i.answered + " answered · " + i.name })),
+    h("label", { class: "field" }, "Grade against which context bundle? (its CV + job description)", select),
+    sum,
+    h("p", { class: "knob-help", style: "margin:0", text: DEFAULT_NOTE }),
+    h("div", { class: "knob-help" }, (knobs.REVIEW_SYNTHESIZE_RUBRICS === "1" ? "A rubric is written for each question first (slower). " : "Each answer is graded holistically. ")
+      + (knobs.SCORING_BACKEND === "cloud" ? "⚠ Scoring uses the cloud API — answers + CV leave this machine." : "Scoring runs on the local model."), " Change in ⚙ Review settings."),
+    h("div", { class: "actions" }, go, msg)),
+    out);
+  // default the bundle: the one the call used (hub run log) → ?session= → the default bundle (D37)
+  const paintSum = () => renderBundleSummary(sum, select.value);
+  loadSessions(select, i.session || params().get("session")).then(paintSum);
+  select.addEventListener("change", paintSum);
+  if (!i.answered) { go.disabled = true; setMsg(msg, "No answered questions in this capture — nothing to grade."); }
+  if (i.reports.length) {
+    out.appendChild(h("p", { class: "dim" }, "Already reviewed: ", ...i.reports.map((n) => h("button", { type: "button", class: "linkish", text: n, onclick: () => selectReport({ name: n }) }))));
+  }
+  go.addEventListener("click", async () => {
+    go.disabled = true;
+    setMsg(msg, "");
+    const r = await api("/api/review", { method: "POST", body: { qa: i.name, session: select.value } });
+    if (!r.ok) { go.disabled = false; setMsg(msg, r.data.error || "could not start the review", "error"); return; }
+    watchJob(r.data.job, out, go);
+  });
+}
+
+function watchJob(job, out, go) {
+  out.textContent = "";
+  if (job.banner) out.appendChild(h("p", { class: "msg egress", text: job.banner }));
+  const jb = jobBox("Grading " + "answers…");
+  out.appendChild(jb.box);
+  stopPoll = pollJob(job.id, (j) => {
+    if (j.status === "running") { jb.set("Grading your answers — one model call per answer…", j.elapsed); return; }
+    go.disabled = false;
+    out.textContent = "";
+    if (j.status === "error") { out.appendChild(h("p", { class: "msg error", text: "The review failed: " + j.error })); return; }
+    renderScorecard(out, j.result);
+    load();
+  });
+}
+
+async function selectReport(r) {
+  if (stopPoll) { stopPoll(); stopPoll = null; }
+  selected = { report: r.name };
+  paintLists();
+  const d = el("detail");
+  d.textContent = "";
+  const card = h("div", { class: "card" }, h("p", { class: "dim", text: "loading…" }));
+  d.appendChild(card);
+  const res = await api("/api/reports/" + encodeURIComponent(r.name));
+  card.textContent = "";
+  if (!res.ok) { card.appendChild(h("p", { class: "msg error", text: res.data.error })); return; }
+  card.appendChild(h("div", { class: "faint", style: "font-size:12px;margin-bottom:6px", text: "scripts/outputs/" + r.name }));
+  const md = h("div");
+  renderMarkdown(md, res.data.markdown);
+  card.appendChild(md);
+}
+
+(async () => {
+  const cfg = await api("/api/config?group=review");
+  window.REVIEW_KNOBS = Object.fromEntries(((cfg.data && cfg.data.knobs) || []).map((k) => [k.env, k.value]));
+  await load();
+  const want = params().get("qa");
+  const hit = want && DATA.interviews.find((i) => i.name === want);
+  if (hit) selectInterview(hit);
+  const rep = params().get("report");
+  if (rep && DATA.reports.some((r) => r.name === rep)) selectReport({ name: rep });
+  // a review still running from before a page reload
+  const latest = await api("/api/jobs?kind=review");
+  const j = latest.data && latest.data.job;
+  if (j && j.status === "running") {
+    const out = h("div", { style: "margin-top:18px" });
+    el("detail").textContent = "";
+    el("detail").appendChild(out);
+    watchJob(j, out, h("button"));
+  }
+})();
+</script>
+</body>
+</html>

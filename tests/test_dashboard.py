@@ -554,6 +554,79 @@ class TestSuggestionHistory:
         assert dash.suggestions_log_path(p).name == "live_suggestions_20260902_100033.jsonl"
 
 
+class TestQaCapture:
+    """D32: the QaPairer turns the ambient event stream into question↔answer pairs on disk,
+    driven through `make_sink` exactly as the live app drives it."""
+
+    def _sink(self, tmp_path):
+        state, bus = dash.DashboardState(), Recorder()
+        pairer = dash.QaPairer(tmp_path / "interview_qa_test.jsonl")
+        return dash.make_sink(state, bus, qa_pairer=pairer), pairer
+
+    def _line(self, sink, stamp, speaker, text):
+        sink({"kind": "line", "stamp": stamp, "speaker": speaker, "language": "en",
+              "text": text, "tagged": True})
+
+    def _fire(self, sink, stamp, text):
+        # A salient interviewer question: the line, then the gate fire carrying the same text.
+        self._line(sink, stamp, "them", text)
+        sink({"kind": "gate", "stamp": stamp, "fire": True, "detail": "salience YES",
+              "text": text, "language": "en"})
+
+    def _rows(self, pairer):
+        return [json.loads(x) for x in
+                pairer.path.read_text(encoding="utf-8").splitlines() if x.strip()]
+
+    def test_qa_log_path_shares_the_transcript_stamp(self):
+        p = Path("/x/scripts/outputs/live_transcript_20260902_100033.txt")
+        assert dash.qa_log_path(p).name == "interview_qa_20260902_100033.jsonl"
+
+    def test_a_question_pairs_with_the_you_lines_that_follow(self, tmp_path):
+        sink, pairer = self._sink(tmp_path)
+        self._fire(sink, "00:01-00:05", "Tell me about RAG.")
+        self._line(sink, "00:06-00:12", "you", "It retrieves then generates.")
+        self._line(sink, "00:12-00:18", "you", "I used Qdrant.")
+        assert pairer.close() == 1
+
+        rows = self._rows(pairer)
+        assert rows[0]["question"] == "Tell me about RAG."
+        assert rows[0]["answer"] == "It retrieves then generates. I used Qdrant."
+        assert rows[0]["question_language"] == "en"
+        assert "logged_at" in rows[0]
+
+    def test_a_new_question_flushes_the_previous_pair(self, tmp_path):
+        sink, pairer = self._sink(tmp_path)
+        self._fire(sink, "00:01-00:05", "Q1?")
+        self._line(sink, "00:06-00:10", "you", "A1.")
+        self._fire(sink, "00:11-00:15", "Q2?")           # flushes Q1
+        self._line(sink, "00:16-00:20", "you", "A2.")
+        pairer.close()
+
+        rows = self._rows(pairer)
+        assert [r["question"] for r in rows] == ["Q1?", "Q2?"]
+        assert [r["answer"] for r in rows] == ["A1.", "A2."]
+
+    def test_you_lines_before_any_question_are_ignored(self, tmp_path):
+        sink, pairer = self._sink(tmp_path)
+        self._line(sink, "00:00-00:04", "you", "small talk before a question")
+        self._line(sink, "00:04-00:08", "them", "rapport, not a fired question")
+        assert pairer.close() == 0                        # nothing opened → nothing written
+        assert not pairer.path.exists()
+
+    def test_a_gated_out_question_does_not_open_a_pair(self, tmp_path):
+        sink, pairer = self._sink(tmp_path)
+        self._line(sink, "00:00-00:04", "them", "Logistics question?")
+        sink({"kind": "gate", "stamp": "00:00-00:04", "fire": False, "detail": "salience NO"})
+        self._line(sink, "00:05-00:09", "you", "an answer to nothing tracked")
+        assert pairer.close() == 0
+
+    def test_an_unanswered_question_is_written_with_an_empty_answer(self, tmp_path):
+        sink, pairer = self._sink(tmp_path)
+        self._fire(sink, "00:01-00:05", "Unanswered?")
+        assert pairer.close() == 1
+        assert self._rows(pairer)[0]["answer"] == ""       # faithful record; review.py drops it
+
+
 class TestPlanPanel:
     PLAN = [
         PlanStep(id="motivation", title="Motivation", done_signals=["dlaczego", "motywacja"]),
@@ -576,6 +649,15 @@ class TestPlanPanel:
         state = dash.DashboardState(plan=self.PLAN)
         keys = set(state.snapshot()["plan"][0])
         assert "covered" not in keys and "done" not in keys and "status" not in keys
+
+    def test_signals_match_at_a_word_start_only(self):
+        """#1272: a stem matches its inflections, but a short signal never fires inside another word."""
+        plan = [PlanStep(id="api", title="API", done_signals=["rest", "agent"])]
+        state, bus = dash.DashboardState(plan=plan), Recorder()
+        sink = dash.make_sink(state, bus)
+        sink({"kind": "line", "stamp": "03:00-03:30", "speaker": "them", "language": "pl",
+              "text": "To jest interesting, a gdzie byli agentowie?", "tagged": True})
+        assert state.snapshot()["plan"][0]["mentioned"] == ["agent"]
 
     def test_mentions_do_not_repeat(self):
         state, bus = dash.DashboardState(plan=self.PLAN), Recorder()
@@ -1114,6 +1196,30 @@ class TestControlEndpoint:
         r = client.post("/control", json={"switch": "nonsense", "value": 1})
         assert r.status_code == 400
 
+    def test_review_without_any_capture_is_a_400(self):
+        # No interview captured yet → nothing to review, and no model is touched.
+        client = _control_client(_controller())
+        r = client.post("/control", json={"switch": "review"})
+        assert r.status_code == 400
+        assert "no interview captured" in r.json()["error"]
+
+    def test_review_scores_the_captured_pairs(self, tmp_path, monkeypatch):
+        ctrl = _controller()
+        ctrl.bundle = SimpleNamespace(spoken_language="en", role="Eng", company="Acme",
+                                      session_id="hr")
+        qa = tmp_path / "interview_qa_20260101_000000.jsonl"
+        qa.write_text('{"question": "What is RAG?", "answer": "Retrieval then generation."}\n',
+                      encoding="utf-8")
+        ctrl._last_qa_path = qa
+        monkeypatch.setattr(dash, "score_session", _fake_report)   # no model, no disk
+        client = _control_client(ctrl)
+
+        r = client.post("/control", json={"switch": "review"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is True and "review" in body
+        assert body["review"]["answered"] == 1
+
     def test_hello_carries_the_controls_state_in_app_mode(self):
         ctrl = _controller(cloud=True)
         with _control_client(ctrl).websocket_connect("/ws") as socket:
@@ -1127,3 +1233,263 @@ class TestControlEndpoint:
         with _control_client(controller=None).websocket_connect("/ws") as socket:
             hello = json.loads(socket.receive_text())
         assert hello["controls"] is None
+
+
+# ==========================================================================
+# Training mode (#650): the TrainingController, the "training" /control switch,
+# the question/answer/scorecard broadcasts, and hello restore of training state.
+# Proven at the TestClient seam with NO subprocess/GPU/model: the recorder
+# lifecycle is monkeypatched (as TestControlEndpoint does) and score_session is
+# swapped for a fixture, so nothing spawns and no model call is made.
+# ==========================================================================
+from scripts.reasoning import Question, Rubric, RubricCriterion  # noqa: E402
+from scripts.training import AnswerScore, CriterionScore, SessionReport  # noqa: E402
+
+
+def _tr_question(i: int) -> Question:
+    return Question(
+        id=f"q{i}", competency=f"comp{i}", question=f"Question {i}?", language="en",
+        rubric=Rubric(criteria=[RubricCriterion(
+            id="depth", label="Depth", weight=1.0,
+            levels={"excellent": "x", "adequate": "y", "weak": "z"})]),
+    )
+
+
+def _tr_bundle(n: int = 2):
+    """A bundle carrying a pre-built question_bank, so `generate_questions` returns it WITHOUT a
+    model call (the branch that would call `llm_call`)."""
+    return SimpleNamespace(
+        question_bank=[_tr_question(i) for i in range(n)], plan=[],
+        role="Eng", company="Acme", session_id="hr", spoken_language="en",
+    )
+
+
+def _fake_report(session, bundle=None, **kwargs) -> SessionReport:
+    """Stand-in for `training.score_session`: no model, no disk. Scores the first question only,
+    enough to exercise `scorecard_payload` end to end."""
+    q = session.questions[0]
+    ans = AnswerScore(
+        question=q, answer_text="my spoken answer",
+        per_criterion=[CriterionScore(id="depth", label="Depth", level="adequate",
+                                      weight=1.0, score=1.0, note="on topic")],
+        total=1.0, max_score=2.0,
+        concepts_to_refresh=["indexing"], strengths=["clear structure"],
+    )
+    return SessionReport(session_id="hr", role="Eng", company="Acme", answers=[ans],
+                         generated_at="2026-01-01 00:00:00", run_id="test", path=None)
+
+
+def _training_controller(*, n: int = 2):
+    ctrl = dash.TrainingController(_app_args(), dash.DashboardState(), Recorder(),
+                                   bundle=_tr_bundle(n), ceiling=31.0, partials_on=False)
+    return ctrl
+
+
+def _training_client(ctrl):
+    """A TestClient whose app has a real EventBus (so `/ws` works) while the controller keeps its
+    Recorder bus — `question`/`answer`/`scorecard` land on the double, hello restores from state."""
+    from fastapi.testclient import TestClient
+    info = dash.RunInfo(source="— (training)", mode="training", session="hr",
+                        salience="n/a", ceiling_seconds=31.0, suggestions=False)
+    return TestClient(dash.create_app(ctrl.state, dash.EventBus(), info, 31.0, controller=ctrl))
+
+
+def _stub_lifecycle(ctrl, monkeypatch):
+    monkeypatch.setattr(ctrl, "_spawn_recorder",
+                        lambda: Path("scripts/outputs/live_transcript_20260101_000000.txt"))
+    monkeypatch.setattr(ctrl, "_start_workers", lambda p, s: None)
+    monkeypatch.setattr(ctrl, "_stop_recorder", lambda: None)
+    monkeypatch.setattr(dash, "score_session", _fake_report)
+    # A model call anywhere in the flow is a bug — fail loudly rather than reach the GPU/network.
+    import scripts.training as training_mod
+
+    def _no_model(*a, **k):
+        raise AssertionError("llm_call must not run in a training-mode unit test")
+    monkeypatch.setattr(training_mod, "llm_call", _no_model)
+
+
+class TestTrainingControl:
+    def test_start_spawns_and_broadcasts_the_first_question_without_the_rubric(self, monkeypatch):
+        ctrl = _training_controller(n=2)
+        _stub_lifecycle(ctrl, monkeypatch)
+        client = _training_client(ctrl)
+
+        r = client.post("/control", json={"switch": "training", "value": "start"})
+        assert r.status_code == 200 and r.json()["ok"] is True
+        assert r.json()["training"]["index"] == 0
+        assert r.json()["training"]["total"] == 2
+        assert r.json()["transcription"] is True
+        assert r.json()["source"] == "live_transcript_20260101_000000.txt"
+
+        q = ctrl.bus.of("question")
+        assert len(q) == 1
+        assert q[0]["training"]["question"] == "Question 0?"
+        assert q[0]["training"]["competency"] == "comp0"
+        # The rubric is withheld from the candidate during the interview.
+        assert "rubric" not in q[0]["training"]
+        assert ctrl.transcription_on is True
+
+    def test_starting_twice_is_refused(self, monkeypatch):
+        ctrl = _training_controller()
+        _stub_lifecycle(ctrl, monkeypatch)
+        client = _training_client(ctrl)
+        assert client.post("/control", json={"switch": "training", "value": "start"}).status_code == 200
+        r = client.post("/control", json={"switch": "training", "value": "start"})
+        assert r.status_code == 400 and "already running" in r.json()["error"]
+
+    def test_a_you_segment_accrues_and_broadcasts_the_answer(self, monkeypatch):
+        ctrl = _training_controller()
+        _stub_lifecycle(ctrl, monkeypatch)
+        _training_client(ctrl).post("/control", json={"switch": "training", "value": "start"})
+
+        # What the tail worker would do for each mic-only segment (tagged "you"):
+        ctrl._route_answer_segment("you", "First part of my answer.")
+        ctrl._route_answer_segment("you", "And the second part.")
+
+        answers = ctrl.bus.of("answer")
+        assert answers, "an answer broadcast should land as text accrues"
+        assert answers[-1]["training"]["answer"] == "First part of my answer. And the second part."
+        assert answers[-1]["training"]["index"] == 0
+        assert ctrl.session.answer_text(0) == "First part of my answer. And the second part."
+
+    def test_a_them_segment_is_ignored(self, monkeypatch):
+        ctrl = _training_controller()
+        _stub_lifecycle(ctrl, monkeypatch)
+        _training_client(ctrl).post("/control", json={"switch": "training", "value": "start"})
+        ctrl._route_answer_segment("them", "an interviewer aside")
+        assert ctrl.bus.of("answer") == []
+        assert ctrl.session.answer_text(0) == ""
+
+    def test_next_advances_to_the_following_question(self, monkeypatch):
+        ctrl = _training_controller(n=2)
+        _stub_lifecycle(ctrl, monkeypatch)
+        client = _training_client(ctrl)
+        client.post("/control", json={"switch": "training", "value": "start"})
+
+        r = client.post("/control", json={"switch": "training", "value": "next"})
+        assert r.status_code == 200 and r.json()["training"]["index"] == 1
+        questions = ctrl.bus.of("question")
+        assert [e["training"]["index"] for e in questions] == [0, 1]
+        assert questions[-1]["training"]["question"] == "Question 1?"
+
+    def test_next_past_the_last_question_auto_finishes_and_scores(self, monkeypatch):
+        ctrl = _training_controller(n=1)
+        _stub_lifecycle(ctrl, monkeypatch)
+        client = _training_client(ctrl)
+        client.post("/control", json={"switch": "training", "value": "start"})
+
+        r = client.post("/control", json={"switch": "training", "value": "next"})
+        assert r.status_code == 200 and r.json()["training"]["finished"] is True
+        assert ctrl.bus.of("scorecard"), "advancing past the last question must auto-finish + score"
+
+    def test_finish_stops_the_recorder_and_broadcasts_the_scorecard(self, monkeypatch):
+        ctrl = _training_controller()
+        stopped = {"n": 0}
+        _stub_lifecycle(ctrl, monkeypatch)
+        monkeypatch.setattr(ctrl, "_stop_recorder", lambda: stopped.__setitem__("n", stopped["n"] + 1))
+        client = _training_client(ctrl)
+        client.post("/control", json={"switch": "training", "value": "start"})
+
+        r = client.post("/control", json={"switch": "training", "value": "finish"})
+        assert r.status_code == 200 and r.json()["training"]["finished"] is True
+        assert stopped["n"] == 1 and ctrl.transcription_on is False
+
+        cards = ctrl.bus.of("scorecard")
+        assert len(cards) == 1
+        sc = cards[0]["scorecard"]
+        assert sc["overall"]["total"] == 1.0 and sc["overall"]["max"] == 2.0
+        assert sc["questions"][0]["criteria"][0]["level"] == "adequate"
+        assert sc["questions"][0]["concepts_to_refresh"] == ["indexing"]
+
+    def test_next_or_finish_before_start_is_refused(self, monkeypatch):
+        ctrl = _training_controller()
+        _stub_lifecycle(ctrl, monkeypatch)
+        client = _training_client(ctrl)
+        assert client.post("/control", json={"switch": "training", "value": "next"}).status_code == 400
+        assert client.post("/control", json={"switch": "training", "value": "finish"}).status_code == 400
+
+    def test_an_unknown_training_value_is_a_400(self, monkeypatch):
+        ctrl = _training_controller()
+        _stub_lifecycle(ctrl, monkeypatch)
+        r = _training_client(ctrl).post("/control", json={"switch": "training", "value": "nonsense"})
+        assert r.status_code == 400
+
+    def test_hello_restores_training_state_for_a_late_browser(self, monkeypatch):
+        ctrl = _training_controller(n=2)
+        _stub_lifecycle(ctrl, monkeypatch)
+        client = _training_client(ctrl)
+        client.post("/control", json={"switch": "training", "value": "start"})
+        ctrl._route_answer_segment("you", "half an answer")
+
+        with client.websocket_connect("/ws") as socket:
+            hello = json.loads(socket.receive_text())
+        assert hello["kind"] == "hello"
+        assert hello["info"]["mode"] == "training"
+        assert hello["training"]["active"] is True
+        assert hello["training"]["index"] == 0
+        assert hello["training"]["question"] == "Question 0?"
+        assert hello["training"]["answer"] == "half an answer"
+        assert hello["training"]["finished"] is False
+        assert "rubric" not in hello["training"]
+
+    def test_hello_restores_the_scorecard_after_the_interview_ends(self, monkeypatch):
+        ctrl = _training_controller(n=1)
+        _stub_lifecycle(ctrl, monkeypatch)
+        client = _training_client(ctrl)
+        client.post("/control", json={"switch": "training", "value": "start"})
+        client.post("/control", json={"switch": "training", "value": "finish"})
+
+        with client.websocket_connect("/ws") as socket:
+            hello = json.loads(socket.receive_text())
+        assert hello["training"]["finished"] is True
+        assert hello["training"]["scorecard"]["overall"]["pct"] == 50
+        # A plain (non-training) dashboard still restores nothing here.
+        assert hello["controls"] is None
+
+    def test_a_non_training_dashboard_has_no_training_state(self):
+        with _control_client(controller=None).websocket_connect("/ws") as socket:
+            hello = json.loads(socket.receive_text())
+        assert hello["training"] is None
+
+
+class TestTrainingUi:
+    """Static UI assertions in the same posture as the rest of the suite (no browser): the
+    training view exists, is driven by /control, and keeps the SI1 rules (textContent, no HTML)."""
+
+    UI = (PROJECT_ROOT / "scripts" / "dashboard_ui.html").read_text(encoding="utf-8")
+
+    def test_the_training_view_exists_and_is_mode_gated(self):
+        assert 'id="training-main"' in self.UI
+        assert 'indexOf("training")' in self.UI
+
+    def test_the_buttons_post_the_training_switch(self):
+        assert 'switch: "training"' in self.UI
+        for value in ("start", "next", "finish"):
+            assert f'postTraining("{value}")' in self.UI
+
+    def test_training_content_is_never_written_as_html(self):
+        block = self.UI.split("function renderScorecard")[1].split("\nfunction connect")[0]
+        assert re.search(r"innerHTML\s*=", block) is None
+        assert "insertAdjacentHTML" not in block
+        assert "textContent" in block
+
+
+class TestReviewUi:
+    """D32: the post-interview review button + panel exist, POST the review switch, and paint the
+    scored review through textContent only (SI1 — no HTML injection of interview content)."""
+
+    UI = (PROJECT_ROOT / "scripts" / "dashboard_ui.html").read_text(encoding="utf-8")
+
+    def test_the_review_button_and_panel_exist(self):
+        assert 'id="btn-review"' in self.UI
+        assert 'id="review-panel"' in self.UI
+
+    def test_the_button_posts_the_review_switch(self):
+        assert 'switch: "review"' in self.UI
+        assert "renderReview" in self.UI
+
+    def test_review_content_is_never_written_as_html(self):
+        block = self.UI.split("function renderReview")[1].split("\nfunction ")[0]
+        assert re.search(r"innerHTML\s*=", block) is None
+        assert "insertAdjacentHTML" not in block
+        assert "textContent" in block

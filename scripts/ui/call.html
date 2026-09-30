@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#12151b">
+<title>Call — Interview copilot</title>
+<link rel="stylesheet" href="/static/app.css">
+<!--
+  D35 Call view — the live copilot (D12/D18/D23/D25/D32), one job: help during a real interview.
+  Setup (pick a bundle, check devices) → live (suggestion first, transcript beside it, plan optional).
+  The meter's arithmetic is Python's (dashboard.meter_state); this page only paints what it is told
+  and greys out when the ticks stop. SI2/D11: the disclosure below is permanent — no hide control,
+  no opacity slider, no always-on-top. Do not add one.
+-->
+<style>
+  #live { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="/" id="home">← Menu</a>
+  <h1>Call</h1>
+  <span class="sep">·</span>
+  <span class="disclosure-tag">Disclosed AI assistance (D11)</span>
+  <span class="sep">·</span>
+  <span class="meta">Local only — <code translate="no">127.0.0.1</code></span>
+  <span class="spacer"></span>
+  <button type="button" class="btn small ghost gear" id="gear">⚙ Call settings</button>
+</header>
+
+<!-- ============ setup ============ -->
+<!-- hidden until /api/status says whether a call is already running — a reload mid-call must not
+     flash the setup screen (e2e round 1) -->
+<div class="page" id="setup" hidden>
+  <main class="narrow setup">
+    <div>
+      <p class="page-title">Start a call</p>
+      <p class="page-lede">Open the copilot for a real interview. Nothing is captured until you press <strong>Start listening</strong>.</p>
+    </div>
+    <div class="banner capture" id="saved-banner" hidden role="status">
+      <span class="grow" id="saved-text"></span>
+      <a class="btn small primary" id="saved-review" href="/review">Review it</a>
+    </div>
+    <div class="banner" id="busy-banner" hidden role="alert">
+      <span class="grow" id="busy-text"></span>
+      <a class="btn small" href="/train">Go to it</a>
+      <button type="button" class="btn small danger" id="busy-stop">End it</button>
+    </div>
+    <section class="card" aria-labelledby="c1">
+      <h3 id="c1"><span class="step-no">1</span> Context for this interview</h3>
+      <label class="field" style="margin-top:8px">Context bundle
+        <select id="bundle"></select>
+      </label>
+      <div class="bundle-sum" id="bundle-sum"></div>
+      <p class="knob-help default-note" style="margin:10px 0 0"></p>
+      <p class="knob-help" style="margin:10px 0 0">No bundle for this job yet? <a href="/generate">Generate one from the job description</a>.</p>
+    </section>
+    <section class="card" aria-labelledby="c2">
+      <h3 id="c2"><span class="step-no">2</span> Before you start</h3>
+      <ul class="checklist" id="checklist"></ul>
+      <p class="knob-help" style="margin:10px 0 0">Devices and models: <a href="/settings#g-general">Settings</a> · this mode's behaviour: ⚙ Call settings (top right).</p>
+    </section>
+    <div class="actions">
+      <button type="button" class="btn primary big" id="open">Open the call</button>
+      <span class="msg" id="setup-msg" role="status"></span>
+    </div>
+  </main>
+</div>
+
+<!-- ============ live ============ -->
+<div id="live" hidden>
+  <div class="callbar">
+    <button type="button" class="btn rec-btn" id="rec" aria-pressed="false"><span class="rec-dot" aria-hidden="true"></span><span id="rec-text">Start listening</span></button>
+    <label class="switch" id="wrap-suggestions">
+      <input type="checkbox" id="sw-suggestions">
+      <span class="track"></span>
+      <span class="switch-name">Suggestions <span class="switch-state" id="st-suggestions">on</span></span>
+    </label>
+    <label class="switch egress" id="wrap-backend">
+      <input type="checkbox" id="sw-backend">
+      <span class="track"></span>
+      <span class="switch-name">Answers <span class="switch-state" id="st-backend">local only</span></span>
+    </label>
+    <span class="msg grow" id="control-msg" role="status"></span>
+    <span class="badge accent" id="bundle-badge" title="Context bundle"></span>
+    <button type="button" class="btn small" id="plan-toggle" aria-pressed="true">Plan</button>
+    <button type="button" class="btn small danger" id="end">End call</button>
+  </div>
+  <div class="stale-curtain" id="curtain" role="status" hidden><strong>Not live.</strong> <span id="stale-why"></span></div>
+  <div class="meter m-cold" id="meter">
+    <span aria-hidden="true" id="meter-icon">○</span>
+    <span class="meter-label" id="meter-text">waiting for the first transcript line</span>
+    <div class="meter-track" aria-hidden="true"><div class="meter-fill" id="meter-fill"></div></div>
+    <span class="meter-note" id="meter-note"></span>
+    <p class="visually-hidden" role="status" id="meter-announce"></p>
+  </div>
+  <main class="call-main" id="call-main">
+    <section class="panel" aria-labelledby="sugg-h">
+      <div class="head"><h2 id="sugg-h">Suggestion</h2><span class="count" id="gate-count"></span></div>
+      <div class="sugg-body" id="sugg-body">
+        <p class="empty">Nothing suggested yet. A suggestion appears only when the interviewer asks a real question (the question rule <em>and</em> the salience gate) — a blank panel is the normal state.</p>
+      </div>
+      <div class="sugg-history" id="sugg-history" hidden>
+        <button type="button" class="sugg-history-head" id="sugg-history-head" aria-expanded="true">Earlier suggestions</button>
+        <div class="hist-list" id="sugg-history-list"></div>
+      </div>
+    </section>
+    <section class="panel" aria-labelledby="transcript-h">
+      <div class="head"><h2 id="transcript-h">Transcript</h2><span class="count" id="transcript-count">0 lines</span></div>
+      <div class="body" id="transcript-body">
+        <p class="empty">Press <strong>Start listening</strong> when the call begins. The interviewer appears on the left, you on the right.</p>
+        <div id="provisional-slot" role="status" aria-label="Provisional text for the segment still being spoken"></div>
+      </div>
+    </section>
+    <section class="panel" aria-labelledby="plan-h" id="plan-panel" hidden>
+      <div class="head"><h2 id="plan-h">Plan</h2><span class="count" id="plan-count"></span></div>
+      <div class="body" id="plan-body"></div>
+      <p class="legend" id="plan-legend"></p>
+    </section>
+  </main>
+  <div class="statusline" id="statusline"></div>
+</div>
+
+<script src="/static/common.js"></script>
+<script>
+"use strict";
+document.querySelectorAll(".default-note").forEach((n) => { n.textContent = DEFAULT_NOTE; });
+const TICK_GRACE_MS = 2000;
+let socket = null, lastTick = 0, live = false;
+let transcriptionOn = false, lastSource = null, session = null;
+let plan = [], trackMentions = false, planOpen = true;
+let suggestionEl = null, suggestionTextEl = null, suggestionBadgeEl = null, currentSuggestionId = null, suggestionRaw = "";
+let STATUS = {};
+
+initSettingsDrawer(el("gear"), "call", "Call settings");
+
+/* ---------------- setup ---------------- */
+async function paintSetup() {
+  if (!live) el("setup").hidden = false;
+  const st = await api("/api/status");
+  STATUS = st.data || {};
+  const a = STATUS.active;
+  el("busy-banner").hidden = !(a && a.mode !== "call");
+  if (a && a.mode !== "call") {
+    el("busy-text").textContent = "A training session is open on “" + a.session + "”" + (a.capturing ? " and is using the microphone." : ".") + " Only one can run at a time.";
+  }
+  let pref = params().get("session");
+  if (!pref) { try { pref = localStorage.getItem("copilot.callBundle"); } catch (e) { /* storage blocked */ } }
+  await loadSessions(el("bundle"), pref);
+  renderBundleSummary(el("bundle-sum"), el("bundle").value);
+  paintChecklist();
+}
+function paintChecklist() {
+  const s = STATUS, list = el("checklist");
+  list.textContent = "";
+  const row = (ok, text, hint) => list.appendChild(h("li", {},
+    h("span", { class: "ic " + (ok === true ? "ok-text" : ok === false ? "warn-text" : "dim"), "aria-hidden": "true", text: ok === true ? "✓" : ok === false ? "⚠" : "•" }),
+    h("span", {}, text, hint ? h("span", { class: "dim", text: " — " + hint }) : null)));
+  row(s.mic && s.mic !== "auto", "Microphone: " + (s.mic || "?"), s.mic === "auto" ? "auto picks the webcam mic, set your external mic in Settings" : null);
+  row(s.source && s.source !== "auto" ? true : null, "Teams audio: " + (s.source || "?"), s.source === "auto" ? "the default output's monitor" : null);
+  const o = s.ollama || {};
+  const loaded = (o.loaded || []).includes(s.local_model);
+  row(o.reachable ? (loaded ? true : null) : false, "Local model: " + (s.local_model || "?"),
+      o.reachable ? (loaded ? "loaded" : "loads on the first question (~10 s once)") : "Ollama is not reachable, so suggestions will fail");
+  row(null, "Answers start " + (s.cloud_available ? "local (cloud can be switched on during the call)" : "local only — cloud is not configured"));
+}
+el("bundle").addEventListener("change", () => renderBundleSummary(el("bundle-sum"), el("bundle").value));
+el("busy-stop").addEventListener("click", async () => {
+  if (!confirm("End the training session? Its capture stops.")) return;
+  await api("/api/mode/stop", { method: "POST" });
+  paintSetup();
+});
+el("open").addEventListener("click", async () => {
+  const id = el("bundle").value;           // "" = the default bundle (D37)
+  el("open").disabled = true;
+  setMsg(el("setup-msg"), "opening…");
+  const r = await api("/api/mode", { method: "POST", body: { mode: "call", session: id } });
+  el("open").disabled = false;
+  if (!r.ok) { setMsg(el("setup-msg"), r.data.error || "could not open the call", "error"); return; }
+  try { localStorage.setItem("copilot.callBundle", id); } catch (e) { /* storage blocked */ }
+  setMsg(el("setup-msg"), "");
+  connect();
+});
+
+function showLive(on) {
+  live = on;
+  el("setup").hidden = on;
+  el("live").hidden = !on;
+  document.body.classList.toggle("disconnected", false);
+}
+
+/* ---------------- live: transcript ---------------- */
+function turnNode(p, provisional) {
+  const side = p.speaker === "you" ? "you" : "them";
+  const turn = h("article", { class: "turn " + side + (p.tagged ? "" : " untagged") + (provisional ? " provisional" : "") });
+  const who = h("div", { class: "who" },
+    h("b", { text: p.tagged ? (p.speaker === "you" ? "You" : "Interviewer") : "Untagged (assumed interviewer)" }),
+    provisional ? h("span", { class: "prov-tag", text: "provisional" }) : null,
+    h("span", { text: p.stamp + (p.language ? " · " + p.language : "") }));
+  turn.append(who, h("div", { class: "bubble", text: p.text }));
+  if (provisional) turn.appendChild(h("div", { class: "prov-note", text: "still being said — replaced by the transcript line" }));
+  return turn;
+}
+function clearEmpty(body) { const e = body.querySelector(".empty"); if (e) e.remove(); }
+function renderLine(line) {
+  const body = el("transcript-body");
+  clearEmpty(body);
+  body.insertBefore(turnNode(line, false), el("provisional-slot"));
+  scrollTranscript(body);
+}
+function renderProvisional(p) {
+  const slot = el("provisional-slot");
+  slot.textContent = "";
+  if (!p || !p.text) return;
+  clearEmpty(el("transcript-body"));
+  slot.appendChild(turnNode(p, true));
+  scrollTranscript(el("transcript-body"));
+}
+function scrollTranscript(body) {
+  if (body.scrollHeight - body.scrollTop - body.clientHeight < 140) body.scrollTop = body.scrollHeight;
+}
+function renderCounters(c, dropped) {
+  const bits = [c.lines + (c.lines === 1 ? " line" : " lines"), c.them + " them", c.you + " you"];
+  if (c.untagged) bits.push(c.untagged + " untagged");
+  if (dropped) bits.push(dropped + " older dropped");
+  el("transcript-count").textContent = bits.join(" · ");
+  let gate = c.fired + " answered · " + c.dropped + " not a real question";
+  if (c.cooldown) gate += " · " + c.cooldown + " held by cooldown";
+  el("gate-count").textContent = gate;
+  window.lastCounters = c;
+  paintStatusline();
+}
+
+/* ---------------- live: meter (P5) ---------------- */
+const METER_ICON = { cold: "○", waiting: "◔", overdue: "△" };
+let announcedState = null;
+function renderMeter(m) {
+  const box = el("meter");
+  if (!transcriptionOn) {
+    box.className = "meter m-off";
+    el("meter-icon").textContent = "⏸";
+    el("meter-text").textContent = "not listening";
+    el("meter-note").textContent = "press Start listening when the call begins";
+    el("meter-fill").style.transform = "scaleX(0)";
+    if (announcedState !== "off") { announcedState = "off"; el("meter-announce").textContent = "not listening"; }
+    return;
+  }
+  box.className = "meter m-" + m.state;
+  el("meter-icon").textContent = METER_ICON[m.state] || "○";
+  el("meter-text").textContent = m.label;
+  el("meter-note").textContent = m.state === "waiting" ? "ceiling " + fmt(m.ceiling_seconds) + " s (segment cap + decode)"
+    : m.state === "overdue" ? "past the ceiling — no promise left to show" : "";
+  if (m.state === "waiting" && m.ceiling_seconds > 0) {
+    el("meter-fill").style.transform = "scaleX(" + Math.max(0, Math.min(1, m.since_seconds / m.ceiling_seconds)).toFixed(3) + ")";
+  }
+  if (m.state !== announcedState) { announcedState = m.state; el("meter-announce").textContent = m.label; }
+}
+
+/* ---------------- live: suggestion ---------------- */
+const SUGG_LABELS = ["POINT", "EVIDENCE", "DETAIL", "SAY", "CODE", "AVOID", "NOTE", "ANSWER"];
+function formatSuggestion(container, raw) {
+  container.textContent = "";
+  let content = null;
+  const openBlock = (label) => {
+    const block = h("div", { class: "sugg-block" + (label === "POINT" ? " point" : "") });
+    if (label) block.appendChild(h("div", { class: "sugg-label", text: label }));
+    content = h("div", { class: "sugg-content" });
+    block.appendChild(content);
+    container.appendChild(block);
+  };
+  for (const line of (raw || "").split("\n")) {
+    const m = line.match(/^\s*([A-Za-z][A-Za-z ]{1,10}?)\s*:\s*(.*)$/);
+    const label = m && SUGG_LABELS.includes(m[1].trim().toUpperCase()) ? m[1].trim().toUpperCase() : null;
+    if (label) { openBlock(label); if (m[2]) content.appendChild(h("div", { class: "sugg-para", text: m[2] })); continue; }
+    if (content === null) openBlock(null);
+    const bullet = line.match(/^\s*[-•*]\s+(.*)$/);
+    if (bullet) content.appendChild(h("div", { class: "sugg-bullet", text: bullet[1] }));
+    else if (line.trim() !== "") content.appendChild(h("div", { class: "sugg-para", text: line }));
+  }
+}
+function renderSuggestion(s) {
+  const body = el("sugg-body");
+  body.textContent = "";
+  currentSuggestionId = s.id;
+  const badge = h("span", { class: "badge live" });
+  const head = h("div", { style: "display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap" }, badge,
+    s.language ? h("span", { class: "badge", text: s.language }) : null);
+  const text = h("div", { class: "sugg-text" });
+  const wrap = h("div", {}, head, h("div", { class: "sugg-q", text: (s.stamp ? "[" + s.stamp + "] " : "") + s.segment }), text,
+    s.note ? h("p", { class: "knob-help", text: s.note }) : null);
+  suggestionRaw = s.text || "";
+  formatSuggestion(text, suggestionRaw);
+  body.appendChild(wrap);
+  suggestionEl = wrap; suggestionTextEl = text; suggestionBadgeEl = badge;
+  applyStatus(s.status);
+}
+function applyStatus(status) {
+  if (!suggestionBadgeEl) return;
+  suggestionBadgeEl.className = "badge " + (status === "streaming" || status === "complete" ? "live" : "gone");
+  suggestionBadgeEl.textContent = status === "streaming" ? "writing…" : status === "complete" ? "answer" : status;
+}
+function renderAge(age) {
+  if (!suggestionEl || !age) return;
+  suggestionEl.classList.toggle("stale", !!age.stale);
+  if (age.stale && suggestionBadgeEl) {
+    suggestionBadgeEl.className = "badge stale";
+    suggestionBadgeEl.textContent = "stale — " + age.lines_since + " lines since";
+  }
+}
+function pointPreview(raw) {
+  const lines = (raw || "").split("\n");
+  for (const line of lines) { const m = line.match(/^\s*POINT\s*:\s*(.*)$/i); if (m && m[1].trim()) return m[1].trim(); }
+  for (const line of lines) if (line.trim()) return line.trim().replace(/^\s*[-•*]\s*/, "");
+  return "(no text)";
+}
+const HISTORY_COLLAPSED_KEY = "copilot.historyCollapsed";
+function applyHistoryCollapsed(c) {
+  el("sugg-history").classList.toggle("collapsed", c);
+  el("sugg-history-head").setAttribute("aria-expanded", c ? "false" : "true");
+}
+el("sugg-history-head").addEventListener("click", () => {
+  const next = !el("sugg-history").classList.contains("collapsed");
+  applyHistoryCollapsed(next);
+  try { localStorage.setItem(HISTORY_COLLAPSED_KEY, next ? "1" : "0"); } catch (e) { /* ignore */ }
+});
+try { applyHistoryCollapsed(localStorage.getItem(HISTORY_COLLAPSED_KEY) === "1"); } catch (e) { /* ignore */ }
+function renderHistory(list) {
+  const items = list || [], wrap = el("sugg-history"), body = el("sugg-history-list");
+  body.textContent = "";
+  wrap.hidden = !items.length;
+  if (!items.length) return;
+  el("sugg-history-head").textContent = "Earlier suggestions (" + items.length + ")";
+  for (const s of items.slice().reverse()) {
+    const detail = h("div", { class: "hist-detail", hidden: true });
+    const item = h("div", { class: "hist-item" });
+    const btn = h("button", { type: "button", class: "hist-row", onclick: () => {
+      if (!detail.childElementCount) formatSuggestion(detail, s.text || "");
+      detail.hidden = !detail.hidden;
+      item.classList.toggle("open", !detail.hidden);
+    } }, h("span", { class: "hist-q", text: (s.stamp ? "[" + s.stamp + "] " : "") + (s.segment || "") + (s.status === "superseded" ? "  · interrupted" : "") }),
+       h("span", { class: "hist-point", text: pointPreview(s.text) }));
+    item.append(btn, detail);
+    body.appendChild(item);
+  }
+}
+
+/* ---------------- live: plan ---------------- */
+function renderPlan(steps) {
+  plan = steps || [];
+  const body = el("plan-body");
+  body.textContent = "";
+  el("plan-toggle").hidden = !plan.length;
+  applyPlanOpen();
+  if (!plan.length) return;
+  for (const step of plan) {
+    const heard = trackMentions && step.mentioned && step.mentioned.length;
+    const row = h("div", { class: "step" }, h("div", { class: "step-title" }, h("span", { text: step.title }),
+      heard ? h("span", { class: "badge", text: "mentioned" }) : null));
+    if (heard) row.appendChild(h("div", { class: "step-sig", text: "heard: " + step.mentioned.join(", ") }));
+    body.appendChild(row);
+  }
+  el("plan-count").textContent = plan.length + " steps";
+  el("plan-legend").textContent = trackMentions
+    ? "“Mentioned” = a phrase from the step’s done_signals was literally said. It is not a claim the step was covered."
+    : "Plan steps only. Nothing here tracks coverage.";
+}
+function applyPlanOpen() {
+  const show = plan.length > 0 && planOpen;
+  el("plan-panel").hidden = !show;
+  el("call-main").classList.toggle("with-plan", show);
+  el("plan-toggle").setAttribute("aria-pressed", show ? "true" : "false");
+  el("plan-toggle").textContent = show ? "Hide plan" : "Show plan";
+}
+try { planOpen = localStorage.getItem("copilot.planOpen") !== "0"; } catch (e) { /* ignore */ }
+el("plan-toggle").addEventListener("click", () => {
+  planOpen = !planOpen;
+  try { localStorage.setItem("copilot.planOpen", planOpen ? "1" : "0"); } catch (e) { /* ignore */ }
+  applyPlanOpen();
+});
+
+/* ---------------- live: controls ---------------- */
+function renderControls(c) {
+  transcriptionOn = !!c.transcription;
+  if (c.source) lastSource = c.source;
+  const rec = el("rec");
+  rec.classList.toggle("on", transcriptionOn);
+  rec.setAttribute("aria-pressed", transcriptionOn ? "true" : "false");
+  el("rec-text").textContent = transcriptionOn ? "Listening — stop" : "Start listening";
+  el("sw-suggestions").checked = !!c.suggestions;
+  el("st-suggestions").textContent = c.suggestions ? "on" : "paused";
+  const cloud = c.backend === "cloud";
+  el("sw-backend").checked = cloud;
+  el("st-backend").textContent = cloud ? "local + cloud API" : "local only";
+  el("wrap-backend").classList.toggle("disabled", !c.cloud_available);
+  el("sw-backend").disabled = !c.cloud_available;
+  el("wrap-backend").title = c.cloud_available ? "" : "cloud is not configured (CLOUD_MODEL + CLOUD_API_KEY)";
+  paintStatusline();
+}
+function controlMsg(text, cls) { setMsg(el("control-msg"), text, cls); }
+async function postControl(sw, value, onDone) {
+  const r = await api("/api/control", { method: "POST", body: { mode: "call", switch: sw, value } });
+  if (!r.ok) {
+    controlMsg(r.data.error || ("could not set " + sw), "error");
+    if (r.data.transcription !== undefined) renderControls(r.data);
+    return;
+  }
+  renderControls(r.data);
+  if (onDone) onDone(r.data);
+}
+el("rec").addEventListener("click", () => {
+  const next = !transcriptionOn;
+  el("rec").disabled = true;
+  controlMsg(next ? "starting capture… (loads the speech model, a few seconds)" : "stopping capture…");
+  postControl("transcription", next, (d) => controlMsg(d.transcription ? "capturing" : "not listening — audio is not captured"))
+    .finally(() => { el("rec").disabled = false; });
+});
+el("sw-suggestions").addEventListener("change", (e) => postControl("suggestions", e.target.checked,
+  (d) => controlMsg(d.suggestions ? "" : "suggestions paused — the transcript keeps running")));
+el("sw-backend").addEventListener("change", (e) => postControl("backend", e.target.checked ? "cloud" : "local",
+  (d) => controlMsg(d.backend === "cloud" ? "⚠ answers use the cloud API — the transcript is sent off this machine"
+                                          : "answers stay on this machine", d.backend === "cloud" ? "egress" : "")));
+el("end").addEventListener("click", async () => {
+  if (transcriptionOn && !confirm("End the call? Capture stops and the microphone is released.")) return;
+  const src = lastSource;
+  await api("/api/mode/stop", { method: "POST" });
+  afterCall(src);
+});
+
+async function afterCall(src) {
+  if (socket) { socket.onclose = null; socket.close(); socket = null; }
+  showLive(false);
+  await paintSetup();
+  el("saved-banner").hidden = true;
+  if (!src) return;
+  const qa = "interview_qa_" + src.replace(/^live_transcript_/, "").replace(/\.txt$/, "") + ".jsonl";
+  const iv = await api("/api/interviews");
+  const found = ((iv.data && iv.data.interviews) || []).find((i) => i.name === qa);
+  if (found && found.pairs) {
+    el("saved-text").textContent = "Interview saved: " + found.pairs + " question" + (found.pairs === 1 ? "" : "s") + " captured, " + found.answered + " answered.";
+    el("saved-review").href = "/review?qa=" + encodeURIComponent(qa) + "&session=" + encodeURIComponent(session || "");
+    el("saved-banner").hidden = false;
+  }
+}
+
+function paintStatusline() {
+  const c = window.lastCounters, i = window.runInfo;
+  const box = el("statusline");
+  box.textContent = "";
+  if (i) box.append(h("span", { text: "salience " + i.salience }), h("span", { text: "provisional " + i.provisional }));
+  if (lastSource) box.append(h("span", { text: "source " + lastSource }));
+  if (c && c.provisional) box.append(h("span", { text: c.provisional + " provisional (" + c.prov_superseded + " superseded" + (c.prov_orphaned ? " · " + c.prov_orphaned + " orphaned" : "") + ")" }));
+}
+
+/* ---------------- socket ---------------- */
+function setConnected(ok, why) {
+  document.body.classList.toggle("disconnected", !ok && live);
+  el("curtain").hidden = ok || !live;
+  if (!ok && why) el("stale-why").textContent = why;
+}
+function resetLive() {
+  el("transcript-body").querySelectorAll(".turn:not(.provisional)").forEach((n) => n.remove());
+  el("provisional-slot").textContent = "";
+  suggestionEl = null; currentSuggestionId = null;
+}
+function connect() {
+  if (socket) { socket.onclose = null; socket.close(); }
+  socket = new WebSocket("ws://" + location.host + "/ws");
+  socket.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
+    if (msg.kind === "idle") { showLive(false); paintSetup(); return; }
+    if (msg.kind === "hello") {
+      if (msg.mode !== "call") { socket.onclose = null; showLive(false); paintSetup(); return; }
+      showLive(true);
+      resetLive();
+      session = msg.session;
+      el("bundle-badge").textContent = msg.session;
+      window.runInfo = msg.info;
+      trackMentions = !!msg.track_mentions;
+      for (const line of msg.lines) renderLine(line);
+      if (!msg.lines.length) {
+        const b = el("transcript-body");
+        if (!b.querySelector(".empty")) b.insertBefore(h("p", { class: "empty" }, "Press ", h("strong", { text: "Start listening" }), " when the call begins. The interviewer appears on the left, you on the right."), el("provisional-slot"));
+      }
+      renderProvisional(msg.provisional);
+      renderCounters(msg.counters, msg.dropped_lines);
+      renderPlan(msg.plan);
+      if (msg.suggestion) renderSuggestion(msg.suggestion);
+      renderHistory(msg.history);
+      if (msg.controls) renderControls(msg.controls);
+      if (msg.meter) renderMeter(msg.meter);
+      lastTick = Date.now();
+      setConnected(true);
+    } else if (msg.kind === "controls") renderControls(msg);
+    else if (msg.kind === "tick") { lastTick = Date.now(); setConnected(true); renderMeter(msg.meter); renderAge(msg.suggestion_age); }
+    else if (msg.kind === "line") { renderLine(msg.line); renderCounters(msg.counters, msg.dropped_lines); }
+    else if (msg.kind === "provisional") { renderProvisional(msg.provisional); renderCounters(msg.counters, 0); }
+    else if (msg.kind === "counters") renderCounters(msg.counters, 0);
+    else if (msg.kind === "plan") renderPlan(msg.plan);
+    else if (msg.kind === "suggestion") renderSuggestion(msg.suggestion);
+    else if (msg.kind === "history") renderHistory(msg.history);
+    else if (msg.kind === "suggestion_token") {
+      if (suggestionTextEl && msg.id === currentSuggestionId) { suggestionRaw += msg.text; formatSuggestion(suggestionTextEl, suggestionRaw); }
+    } else if (msg.kind === "mode_ended") { const src = lastSource; socket.onclose = null; afterCall(src); }
+    else if (msg.kind === "worker_dead") setConnected(false, "The transcript reader stopped. No new lines will arrive — everything below is frozen.");
+  };
+  socket.onclose = () => {
+    if (!live) return;
+    setConnected(false, "The connection to the copilot closed — everything below is a frozen snapshot. Reconnecting…");
+    setTimeout(connect, 1000);
+  };
+}
+setInterval(() => {
+  if (live && lastTick && Date.now() - lastTick > TICK_GRACE_MS) {
+    setConnected(false, "No update from the copilot for over 2 seconds — the meter has stopped and may already be wrong.");
+  }
+}, 500);
+
+(async () => {
+  const st = await api("/api/status");
+  if (st.data && st.data.active && st.data.active.mode === "call") connect();
+  else paintSetup();
+})();
+</script>
+</body>
+</html>

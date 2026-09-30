@@ -94,6 +94,69 @@ def test_wrong_schema_version_is_a_hard_stop(tmp_path):
         reasoning.load_bundle("s1", sessions_dir=tmp_path)
 
 
+def _bundle_with_tactics(tmp_path, tactics_value):
+    session = tmp_path / "s1"
+    session.mkdir()
+    payload = {
+        "schema_version": 2,
+        "resume": {"text": "real content here", "status": "real"},
+    }
+    if tactics_value is not None:
+        payload["tactics"] = tactics_value
+    (session / "bundle.json").write_text(json.dumps(payload), encoding="utf-8")
+    return reasoning.load_bundle("s1", sessions_dir=tmp_path)
+
+
+def test_tactics_absent_loads_empty(tmp_path):
+    """#324 fix 5: a bundle authored before this field loads unchanged — empty list,
+    no placeholder recorded, no crash."""
+    bundle = _bundle_with_tactics(tmp_path, None)
+    assert bundle.tactics == []
+    assert "tactics" not in bundle.placeholders
+
+
+def test_tactics_present_parses_topic_and_note(tmp_path):
+    bundle = _bundle_with_tactics(
+        tmp_path,
+        [{"topic": "Company vs parent-group scope", "note": "Turn it into the best question: ..."}],
+    )
+    assert len(bundle.tactics) == 1
+    assert bundle.tactics[0].topic == "Company vs parent-group scope"
+    assert bundle.tactics[0].note == "Turn it into the best question: ..."
+
+
+def test_tactics_malformed_entry_does_not_crash(tmp_path):
+    """A tactic entry missing `note` (or `topic`) still loads — tolerant `.get()` parsing,
+    matching the existing honesty_boundary/answer_bank/plan pattern, not a hard stop."""
+    bundle = _bundle_with_tactics(tmp_path, [{"topic": "no note field here"}, {"note": "no topic"}])
+    assert bundle.tactics == [
+        reasoning.Tactic(topic="no note field here", note=""),
+        reasoning.Tactic(topic="", note="no topic"),
+    ]
+
+
+def test_tactics_render_as_a_tagged_instruction_block(tmp_path):
+    """The tagged block is what makes a tactic a first-class instruction rather than prose
+    the model may or may not weight (the review's own diagnosis of why suggestion #17 missed
+    it) — assert the system prompt actually carries the section and the note text."""
+    bundle = _bundle_with_tactics(
+        tmp_path,
+        [{"topic": "Company vs parent-group scope",
+          "note": "Turn it into the best question: is this building toward LMOS?"}],
+    )
+    system, _ = reasoning.build_messages(bundle, "Some question")
+    assert "=== STRATEGIC TACTICS" in system
+    assert "Company vs parent-group scope" in system
+    assert "Turn it into the best question: is this building toward LMOS?" in system
+
+
+def test_tactics_absent_renders_a_placeholder_not_a_missing_section(tmp_path):
+    bundle = _bundle_with_tactics(tmp_path, None)
+    system, _ = reasoning.build_messages(bundle, "Some question")
+    assert "=== STRATEGIC TACTICS" in system
+    assert "(none recorded)" in system
+
+
 def test_missing_referenced_file_is_a_hard_stop(tmp_path):
     session = tmp_path / "s1"
     session.mkdir()
@@ -130,6 +193,33 @@ def test_questions_fire(text):
     ],
 )
 def test_statements_do_not_fire(text):
+    assert not reasoning.looks_like_question(text)
+
+
+def test_prompt_verb_fires_on_a_later_sentence_in_a_vad_merged_segment():
+    """#324 fix 1: two sentences merged into one VAD segment, opener buried past every
+    position window of the FIRST sentence. Reproduces the missed [12:15-12:31] turn from
+    the 2026-09-14 review."""
+    text = (
+        "Właśnie, a może przejdziemy płynnie do pytań, ja muszę Panu zadać kilka pytań, "
+        "przepraszam, ale przepinować czas. Właśnie, może niech Pan trochę opowie o swoim "
+        "doświadczeniu."
+    )
+    assert reasoning.looks_like_question(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # A later sentence opening with a bare interrogative (subordinating conjunction in
+        # Polish, not a real question) must NOT fire just because it is now checked
+        # per-sentence — only the imperative/prompt-verb branch is re-run per sentence.
+        "A firma nie może pozwolić, żeby stracić inżyniera. Nie wiadomo co się wydarzy.",
+        "No tak, studia nie są wymagane. Dobra, jak ktoś chce być menadżerem, to lepiej mieć papier.",
+        "Robimy dużo projektów. Czyli mamy tu inny temat zupełnie.",
+    ],
+)
+def test_later_sentence_interrogative_prefix_does_not_fire(text):
     assert not reasoning.looks_like_question(text)
 
 
@@ -719,3 +809,24 @@ class TestTheProvisionalNeverReachesReasoning:
         exists. If a future edit teaches it, this fails before a live call finds out."""
         source = (PROJECT_ROOT / "scripts" / "reasoning.py").read_text(encoding="utf-8")
         assert ".partial" not in source
+
+
+def test_empty_honesty_boundary_gets_the_generic_rule():
+    """F1 (#1270): a CV-only bundle (no honesty rows) must still carry an explicit no-overclaim rule."""
+    from scripts.reasoning import ContextBundle, EMPTY_HONESTY_RULE, build_messages
+    bare = ContextBundle(session_id="cv_only", role="AI Engineer", company="", spoken_language="pl",
+                         suggestion_language="match", job_description="JD", company_brief="",
+                         resume="Python, RAG", answer_bank=[], plan=[], honesty_boundary=[],
+                         placeholders=[], source_dir=Path("."))
+    system, _ = build_messages(bare, "Czy ma pan doświadczenie z szeregami czasowymi?")
+    assert EMPTY_HONESTY_RULE in system and "Never inflate" in system
+
+
+def test_recorded_honesty_rows_replace_the_generic_rule():
+    from scripts.reasoning import ContextBundle, EMPTY_HONESTY_RULE, HonestyClaim, build_messages
+    b = ContextBundle(session_id="s", role="r", company="", spoken_language="pl", suggestion_language="match",
+                      job_description="", company_brief="", resume="", answer_bank=[], plan=[],
+                      honesty_boundary=[HonestyClaim(claim="shipped Qdrant", truth="never used Qdrant")],
+                      placeholders=[], source_dir=Path("."))
+    system, _ = build_messages(b, "Qdrant?")
+    assert EMPTY_HONESTY_RULE not in system and "never used Qdrant" in system

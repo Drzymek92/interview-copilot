@@ -293,8 +293,83 @@
   .control-msg { font-size: 12px; color: var(--ink-dim); margin-left: auto; overflow-wrap: anywhere; }
   .control-msg.egress { color: var(--bad); font-weight: 600; }
   .control-msg.error { color: var(--bad); }
+  /* D32 review panel */
+  .review-panel { margin: 0 16px 12px; padding: 14px 16px; background: var(--panel);
+    border: 1px solid var(--line); border-radius: var(--radius); }
+  .review-head { display: flex; align-items: baseline; gap: 12px; }
+  .review-head h2 { font-size: 15px; margin: 0; }
+  .review-overall { font-size: 13px; color: var(--ok); font-weight: 600; margin-left: 6px; }
+  .review-close { margin-left: auto; background: none; border: none; color: var(--ink-dim);
+    font-size: 20px; line-height: 1; cursor: pointer; padding: 0 4px; }
+  .review-close:hover { color: var(--ink); }
+  .review-path { font-size: 12px; color: var(--ink-faint); margin: 4px 0 10px; overflow-wrap: anywhere; }
+  .review-item { border-top: 1px solid var(--line); padding: 9px 0; }
+  .review-q { font-size: 13px; color: var(--ink); font-weight: 600; }
+  .review-q .review-pct { color: var(--ink-dim); font-weight: 400; margin-left: 6px; }
+  .review-note { font-size: 12.5px; color: var(--ink-dim); margin: 3px 0 0; }
+  .review-tags { font-size: 12px; margin: 4px 0 0; }
+  .review-tags .lbl { color: var(--ink-faint); }
+  .review-tags .refresh { color: var(--warn); }
+  .review-tags .strength { color: var(--you); }
   .m-off .meter-label { color: var(--ink-dim); }
   .m-off .meter-fill { background: var(--ink-faint); transform: scaleX(0) !important; }
+
+  /* --- training mode (#650 mock interview) --- */
+  main.training-main { grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); }
+  @media (max-width: 1100px) { main.training-main { grid-template-columns: minmax(0, 1fr); } }
+  .tr-competency {
+    font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--accent); margin-bottom: 8px;
+  }
+  .tr-question-text { font-size: 20px; line-height: 1.45; overflow-wrap: anywhere; text-wrap: balance; }
+  .tr-answer-wrap { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 14px; }
+  .tr-answer-label {
+    font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-dim);
+    margin: 0 0 8px; font-weight: 650; display: flex; align-items: center; gap: 8px;
+  }
+  .tr-live-tag {
+    font-size: 10.5px; font-weight: 650; letter-spacing: 0.03em; text-transform: uppercase;
+    color: var(--ok); border: 1px solid #2f5a44; border-radius: 999px; padding: 1px 7px;
+  }
+  .tr-answer { font-size: 16px; line-height: 1.6; overflow-wrap: anywhere; color: var(--ink); }
+  .tr-answer:empty::before { content: "Listening… speak your answer."; color: var(--ink-faint); }
+  .tr-controls {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+    padding: 12px 14px; border-top: 1px solid var(--line); background: var(--panel-2);
+  }
+  .tr-btn {
+    font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+    background: var(--panel); color: var(--ink); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px 16px;
+  }
+  .tr-btn:hover { border-color: var(--accent); }
+  .tr-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .tr-btn.primary { background: var(--accent); color: #12151b; border-color: var(--accent); }
+
+  .tr-sc-q { padding: 12px 0; border-bottom: 1px solid var(--line); }
+  .tr-sc-q:last-child { border-bottom: 0; }
+  .tr-sc-q-head {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+    margin-bottom: 6px;
+  }
+  .tr-sc-q-title { font-size: 12px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-dim); }
+  .tr-sc-q-score { font-size: 14px; font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .tr-sc-question { font-size: 14.5px; margin-bottom: 6px; overflow-wrap: anywhere; }
+  .tr-sc-answer {
+    font-size: 13px; color: var(--ink-dim); border-left: 2px solid var(--line);
+    padding-left: 10px; margin-bottom: 10px; overflow-wrap: anywhere;
+  }
+  .tr-sc-crit { display: flex; gap: 8px; align-items: baseline; margin-bottom: 5px; font-size: 13px; }
+  .tr-level {
+    flex: 0 0 auto; font-size: 10.5px; font-weight: 700; letter-spacing: 0.03em; text-transform: uppercase;
+    border-radius: 999px; padding: 1px 8px; border: 1px solid var(--line); color: var(--ink-dim);
+  }
+  .tr-level.level-excellent { color: var(--ok); border-color: #2f5a44; }
+  .tr-level.level-adequate { color: var(--them); border-color: #2c4a63; }
+  .tr-level.level-weak { color: var(--warn); border-color: #5c4a28; }
+  .tr-level.level-missing { color: var(--bad); border-color: #5b3030; }
+  .tr-crit-label { overflow-wrap: anywhere; }
+  .tr-sc-meta { font-size: 12.5px; color: var(--ink-dim); margin-top: 6px; overflow-wrap: anywhere; }
 </style>
 </head>
 <body class="disconnected">
@@ -327,14 +402,26 @@
     <span class="track"></span>
     <span class="switch-name">Answers: <span class="switch-state" id="st-backend">local only</span></span>
   </label>
+  <button type="button" class="tr-btn" id="btn-review" title="Grade the questions you were asked against your CV + the job info">Review answers</button>
   <span class="control-msg" id="control-msg" role="status"></span>
 </div>
+
+<!-- D32/D34: post-interview review of the captured question↔answer pairs (a dashboard action beside
+     the CLI). Hidden until a review runs. Local-only — the grades never leave this machine (SI1). -->
+<section class="review-panel" id="review-panel" hidden aria-labelledby="review-h">
+  <div class="review-head">
+    <h2 id="review-h">Interview review <span class="review-overall" id="review-overall"></span></h2>
+    <button type="button" class="review-close" id="review-close" aria-label="Hide the review">×</button>
+  </div>
+  <p class="review-path" id="review-path"></p>
+  <div id="review-list"></div>
+</section>
 
 <div class="stale-curtain" role="status">
   <strong>Not live.</strong> <span id="stale-why">The dashboard is not connected — everything below is a frozen snapshot and may already be wrong.</span>
 </div>
 
-<main>
+<main id="copilot-main">
   <section aria-labelledby="sugg-h">
     <div class="meter m-cold" id="meter">
       <div class="meter-label">
@@ -380,6 +467,45 @@
       <p class="empty">No plan loaded for this session.</p>
     </div>
     <p class="legend" id="plan-legend"></p>
+  </section>
+</main>
+
+<!-- #650 training mode. Shown instead of the copilot panels when the server runs with --training
+     (hello.info.mode === "training"). A mock interview: one question at a time, the spoken answer
+     captured live, and the rubric withheld until the scorecard. -->
+<main class="training-main" id="training-main" hidden>
+  <section aria-labelledby="tr-q-h">
+    <div class="head">
+      <h2 id="tr-q-h">Question</h2>
+      <span class="count" id="tr-progress"></span>
+    </div>
+    <div class="body">
+      <p class="empty" id="tr-idle">Press <strong>Start</strong> to begin the mock interview. Questions appear here one at a time and your spoken answer is captured by the microphone. The grading rubric stays hidden until the scorecard, so nothing coaches the answer.</p>
+      <div id="tr-question" hidden>
+        <div class="tr-competency" id="tr-competency"></div>
+        <div class="tr-question-text" id="tr-question-text"></div>
+      </div>
+      <div class="tr-answer-wrap" id="tr-answer-wrap" hidden>
+        <h3 class="tr-answer-label">Your answer <span class="tr-live-tag">live</span></h3>
+        <div class="tr-answer" id="tr-answer" role="status" aria-label="Your spoken answer, transcribed live"></div>
+      </div>
+    </div>
+    <div class="tr-controls">
+      <button type="button" class="tr-btn" id="tr-start">Start</button>
+      <button type="button" class="tr-btn" id="tr-next" hidden>Next question</button>
+      <button type="button" class="tr-btn primary" id="tr-finish" hidden>Finish &amp; score</button>
+      <span class="control-msg" id="tr-msg" role="status"></span>
+    </div>
+  </section>
+
+  <section aria-labelledby="tr-sc-h">
+    <div class="head">
+      <h2 id="tr-sc-h">Scorecard</h2>
+      <span class="count" id="tr-sc-overall"></span>
+    </div>
+    <div class="body" id="tr-scorecard">
+      <p class="empty">The scorecard appears here after you finish: a per-question breakdown against each rubric criterion, plus concepts to refresh and what the answer did well. Nothing leaves this machine.</p>
+    </div>
   </section>
 </main>
 
@@ -874,6 +1000,218 @@ function wireControls() {
         : "answers stay on this machine — no egress",
         d.backend === "cloud" ? "egress" : ""));
   });
+  el("btn-review").addEventListener("click", requestReview);
+  el("review-close").addEventListener("click", () => { el("review-panel").hidden = true; });
+}
+
+/* ---------------- D32 post-interview review ----------------
+   Grades the captured question↔answer pairs against the CV + JD. The button POSTs
+   {switch:"review"}; the server does the (blocking) scoring and broadcasts a `review` message,
+   which is the single source this panel paints from. All content goes in via textContent. */
+async function requestReview() {
+  const btn = el("btn-review");
+  btn.disabled = true;
+  controlMsg("reviewing your answers… (this runs the grader once per answer)");
+  try {
+    const r = await fetch("/control", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ switch: "review" }),
+    });
+    const data = await r.json();
+    if (!r.ok || data.error) {
+      controlMsg(data.error || "could not review the answers", "error");
+    } else {
+      controlMsg("");   // the `review` broadcast renders the panel
+    }
+  } catch (e) {
+    controlMsg("could not reach the copilot to review the answers", "error");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderReview(rv) {
+  const panel = el("review-panel");
+  panel.hidden = false;
+  const o = rv.overall || {};
+  el("review-overall").textContent = (o.answered != null)
+    ? (o.answered + " answer(s) · " + (o.total) + " / " + (o.max) + " (" + (o.pct) + "%)") : "";
+  el("review-path").textContent = rv.path ? ("saved: " + rv.path) : "";
+  const list = el("review-list");
+  list.textContent = "";
+  (rv.questions || []).forEach((q, i) => {
+    const item = document.createElement("div");
+    item.className = "review-item";
+    const qh = document.createElement("div");
+    qh.className = "review-q";
+    qh.textContent = "Q" + (i + 1) + ". " + (q.question || "");
+    const pct = document.createElement("span");
+    pct.className = "review-pct";
+    pct.textContent = (q.pct != null ? q.pct + "%" : "");
+    qh.appendChild(pct);
+    item.appendChild(qh);
+    const crit = (q.criteria && q.criteria[0]) || null;
+    if (crit && crit.note) {
+      const note = document.createElement("p");
+      note.className = "review-note";
+      note.textContent = crit.note;
+      item.appendChild(note);
+    }
+    if (q.concepts_to_refresh && q.concepts_to_refresh.length) {
+      const t = document.createElement("p");
+      t.className = "review-tags";
+      const lbl = document.createElement("span"); lbl.className = "lbl"; lbl.textContent = "Refresh: ";
+      const v = document.createElement("span"); v.className = "refresh"; v.textContent = q.concepts_to_refresh.join(", ");
+      t.appendChild(lbl); t.appendChild(v); item.appendChild(t);
+    }
+    if (q.strengths && q.strengths.length) {
+      const t = document.createElement("p");
+      t.className = "review-tags";
+      const lbl = document.createElement("span"); lbl.className = "lbl"; lbl.textContent = "Strengths: ";
+      const v = document.createElement("span"); v.className = "strength"; v.textContent = q.strengths.join(", ");
+      t.appendChild(lbl); t.appendChild(v); item.appendChild(t);
+    }
+    list.appendChild(item);
+  });
+}
+
+/* ---------------- training mode (#650 mock interview) ----------------
+   Shown instead of the copilot panels when hello.info.mode === "training". Every button POSTs
+   {switch:"training", value:"start"|"next"|"finish"} to /control; the server broadcasts the
+   resulting `question` / `answer` / `scorecard`, and this file only paints what it is told —
+   the same discipline as the meter and the switches. All call content goes in via textContent. */
+let trainingMode = false;
+
+function trainingMsg(t) { el("tr-msg").textContent = t || ""; }
+
+function setTrainingPhase(phase) {   // "idle" | "running" | "finished"
+  el("tr-idle").hidden = phase !== "idle";
+  el("tr-question").hidden = phase === "idle";
+  el("tr-answer-wrap").hidden = phase !== "running";
+  el("tr-start").hidden = phase === "running";
+  el("tr-start").textContent = phase === "finished" ? "Start again" : "Start";
+  el("tr-next").hidden = phase !== "running";
+  el("tr-finish").hidden = phase !== "running";
+}
+
+function renderQuestion(t) {
+  if (!t) return;
+  el("tr-progress").textContent = "Question " + (t.index + 1) + " of " + t.total;
+  el("tr-competency").textContent = t.competency || "";
+  el("tr-competency").hidden = !t.competency;
+  el("tr-question-text").textContent = t.question || "";
+  el("tr-answer").textContent = t.answer || "";     // reset (empty) or restore accrued answer
+  trainingMsg("");
+  setTrainingPhase("running");
+}
+
+function renderAnswer(t) {
+  if (!t) return;
+  el("tr-answer").textContent = t.answer || "";
+}
+
+function renderScorecard(sc) {
+  const box = el("tr-scorecard");
+  box.textContent = "";
+  el("tr-progress").textContent = "Interview finished";
+  if (!sc) return;
+  el("tr-sc-overall").textContent = sc.overall
+    ? (fmt(sc.overall.total) + " / " + fmt(sc.overall.max) + " (" + sc.overall.pct + "%) · "
+       + sc.overall.answered + " answered")
+    : "";
+  const questions = sc.questions || [];
+  if (!questions.length) {
+    const p = document.createElement("p");
+    p.className = "empty";
+    p.textContent = "No answers were captured, so there is nothing to score.";
+    box.appendChild(p);
+    return;
+  }
+  for (const q of questions) {
+    const card = document.createElement("div");
+    card.className = "tr-sc-q";
+
+    const head = document.createElement("div");
+    head.className = "tr-sc-q-head";
+    const title = document.createElement("span");
+    title.className = "tr-sc-q-title";
+    title.textContent = "Q" + q.index + (q.competency ? " · " + q.competency : "");
+    const score = document.createElement("span");
+    score.className = "tr-sc-q-score";
+    score.textContent = fmt(q.total) + " / " + fmt(q.max) + " (" + q.pct + "%)";
+    head.appendChild(title);
+    head.appendChild(score);
+    card.appendChild(head);
+
+    const question = document.createElement("div");
+    question.className = "tr-sc-question";
+    question.textContent = q.question;
+    card.appendChild(question);
+
+    const answer = document.createElement("div");
+    answer.className = "tr-sc-answer";
+    answer.textContent = q.answer || "(no answer given)";
+    card.appendChild(answer);
+
+    for (const c of (q.criteria || [])) {
+      const row = document.createElement("div");
+      row.className = "tr-sc-crit";
+      const level = document.createElement("span");
+      level.className = "tr-level level-" + c.level;
+      level.textContent = c.level;
+      const label = document.createElement("span");
+      label.className = "tr-crit-label";
+      label.textContent = c.label + (c.note ? " — " + c.note : "");
+      row.appendChild(level);
+      row.appendChild(label);
+      card.appendChild(row);
+    }
+    if (q.concepts_to_refresh && q.concepts_to_refresh.length) {
+      const d = document.createElement("div");
+      d.className = "tr-sc-meta";
+      d.textContent = "Concepts to refresh: " + q.concepts_to_refresh.join(", ");
+      card.appendChild(d);
+    }
+    if (q.strengths && q.strengths.length) {
+      const d = document.createElement("div");
+      d.className = "tr-sc-meta";
+      d.textContent = "Strengths: " + q.strengths.join(", ");
+      card.appendChild(d);
+    }
+    box.appendChild(card);
+  }
+}
+
+// Restore the whole training view on a (re)connect: mid-question, or finished with a scorecard.
+function renderTraining(t) {
+  if (!t) { setTrainingPhase("idle"); return; }
+  if (t.finished) {
+    renderScorecard(t.scorecard);
+    setTrainingPhase("finished");
+    return;
+  }
+  if (t.active) renderQuestion(t);
+  else setTrainingPhase("idle");
+}
+
+async function postTraining(value) {
+  try {
+    const r = await fetch("/control", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ switch: "training", value: value }),
+    });
+    const data = await r.json();
+    if (!r.ok || data.error) trainingMsg(data.error || ("could not " + value));
+    else trainingMsg("");
+  } catch (e) {
+    trainingMsg("could not reach the copilot");
+  }
+}
+
+function initTraining() {
+  el("tr-start").addEventListener("click", () => { trainingMsg("starting…"); postTraining("start"); });
+  el("tr-next").addEventListener("click", () => postTraining("next"));
+  el("tr-finish").addEventListener("click", () => { trainingMsg("scoring…"); postTraining("finish"); });
 }
 
 function connect() {
@@ -891,6 +1229,11 @@ function connect() {
         + " · ceiling " + fmt(i.ceiling_seconds) + " s"
         + (i.suggestions ? "" : " · no suggestions (tail only)");
       trackMentions = !!msg.track_mentions;
+      // #650: swap the whole surface to the training view when the server runs with --training.
+      trainingMode = !!(i.mode && i.mode.indexOf("training") === 0);
+      el("copilot-main").hidden = trainingMode;
+      el("training-main").hidden = !trainingMode;
+      if (trainingMode) renderTraining(msg.training);
       for (const line of msg.lines) renderLine(line);
       renderProvisional(msg.provisional);
       renderCounters(msg.counters, msg.dropped_lines);
@@ -929,6 +1272,15 @@ function connect() {
         suggestionRaw += msg.text;
         formatSuggestion(suggestionTextEl, suggestionRaw);
       }
+    } else if (msg.kind === "question") {
+      renderQuestion(msg.training);
+    } else if (msg.kind === "answer") {
+      renderAnswer(msg.training);
+    } else if (msg.kind === "scorecard") {
+      renderScorecard(msg.scorecard);
+      setTrainingPhase("finished");
+    } else if (msg.kind === "review") {
+      renderReview(msg);
     } else if (msg.kind === "worker_dead") {
       setConnected(false, "The transcript reader stopped. No new lines will arrive — everything below is frozen.");
     }
@@ -949,6 +1301,7 @@ setInterval(() => {
 }, 500);
 
 initHistoryToggle();
+initTraining();
 connect();
 </script>
 </body>

@@ -30,3 +30,11 @@ __pycache__/
 
 # desktop launcher is machine-specific — ship the .template, generate the real .desktop locally
 *.desktop
+
+# D36: UI-saved settings are per-user
+config/user_settings.json
+
+# D37: the built-in default bundle is a tracked template (not user data)
+!config/bundles/
+!config/bundles/*/
+!config/bundles/*/bundle.json

@@ -20,7 +20,7 @@ tokenizers==0.23.1           # faster-whisper transitive
 
 # --- Audio capture (D17 — PipeWire/Pulse monitor + mic) ---
 sounddevice==0.5.6           # PortAudio bindings; needs native libportaudio2 (see note)
-webrtcvad==2.0.10            # frame-level voice-activity detection for the capture loop
+webrtcvad-wheels==2.0.14     # VAD for the capture loop (maintained fork: no pkg_resources, Windows wheels)
 
 # --- Local web dashboard (D18 — added Day-1 so Day-3 imports are pinned) ---
 fastapi==0.141.1
@@ -45,3 +45,7 @@ openai==2.45.0               # langchain-openai transitive; the HTTP client unde
 python-dotenv==1.2.1         # config/.env loading in scripts/llm_client.py
 anthropic==1.1.0             # cloud backend ONLY (Claude has no OpenAI-compatible endpoint);
                              # see the Policy Override in agent/project.md
+
+# --- Job description / CV files (D37 — Generate view + generate_context.py --jd/--cv) ---
+# PDF text extraction, in-process and local (SI1). Already present in the lab miniconda base.
+pymupdf==1.24.14

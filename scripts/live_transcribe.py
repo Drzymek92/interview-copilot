@@ -269,6 +269,11 @@ class VadSegmenter:
     # the speaker tag (G9/#326). Reset on every _emit.
     remote_votes: int = 0
     mic_votes: int = 0
+    # When set, every segment (final AND provisional) is tagged this speaker regardless of the
+    # per-channel vote. Used by --mic-only, where there is no remote channel to out-vote and the
+    # whole capture IS the candidate (a practice monologue). Default None -> the vote decides,
+    # so the two-stream path is behaviourally unchanged.
+    force_speaker: str | None = None
 
     def __post_init__(self) -> None:
         self.preroll = deque(maxlen=max(1, int(settings.SEGMENT_PREROLL_SECONDS / self.frame_seconds)))
@@ -316,8 +321,9 @@ class VadSegmenter:
         frames, continued = self.frames, self.continued
         speech_seconds = self.speech_frames * self.frame_seconds
         # Dominant channel decides the speaker. Tie (or a monitor-only run where mic_votes
-        # never moves) falls to "them", the side that must never be missed.
-        speaker = "you" if self.mic_votes > self.remote_votes else "them"
+        # never moves) falls to "them", the side that must never be missed. A forced speaker
+        # (--mic-only) short-circuits the vote entirely.
+        speaker = self.force_speaker or ("you" if self.mic_votes > self.remote_votes else "them")
         self.frames, self.in_speech, self.speech_frames, self.silence_run = [], False, 0, 0
         self.remote_votes = self.mic_votes = 0
         self.preroll.clear()
@@ -366,7 +372,7 @@ class VadSegmenter:
         speech_seconds = self.speech_frames * self.frame_seconds
         if speech_seconds < settings.SEGMENT_MIN_SPEECH_SECONDS:
             return None
-        speaker = "you" if self.mic_votes > self.remote_votes else "them"
+        speaker = self.force_speaker or ("you" if self.mic_votes > self.remote_votes else "them")
         return Segment(
             # The index `_emit` WILL hand this segment — advisory only. Consumers join a
             # provisional to its final line on the START stamp, which cannot drift.
@@ -931,11 +937,30 @@ def run_loop(args: argparse.Namespace) -> int:
     # --- resolve inputs -------------------------------------------------
     wav_input: np.ndarray | None = None
     remote_name = mic_name = None
+    mic_only = getattr(args, "mic_only", False)
     if args.from_wav:
         from faster_whisper.audio import decode_audio
 
         wav_input = decode_audio(args.from_wav, sampling_rate=settings.SAMPLE_RATE)
         remote_name = f"file:{Path(args.from_wav).name}"
+    elif mic_only:
+        # Practice-monologue capture: mic ONLY, mono, no monitor. Monitor resolution is
+        # skipped ENTIRELY — the hard `return 2` for a missing monitor must not fire here,
+        # because a practice run legitimately has no remote source.
+        if shutil.which("parec") is None:
+            logger.error("parec not found — sudo apt install pulseaudio-utils (USER step)")
+            return 2
+        if args.source != "auto":
+            # --source names a monitor; there is no monitor in this mode. Ignore it (do not
+            # capture it), and say so, rather than silently pretending it was honoured.
+            logger.warning("--mic-only ignores --source %r (there is no remote channel to capture)", args.source)
+        mic_name = args.mic if args.mic != "auto" else default_mic()
+        if not mic_name:
+            logger.error("--mic-only needs a microphone but none resolved — run --list and pass --mic")
+            return 2
+        if mic_name not in source_names():
+            logger.error("mic %r is not in `pactl list short sources` — run --list", mic_name)
+            return 2
     else:
         if shutil.which("parec") is None:
             logger.error("parec not found — sudo apt install pulseaudio-utils (USER step)")
@@ -954,14 +979,20 @@ def run_loop(args: argparse.Namespace) -> int:
 
     # --- model FIRST, so the first minute of the call is not eaten by a load ---
     logger.info("loading STT model before capture starts (once, outside the loop)")
-    transcriber = Transcriber()
+    # #324: --hotwords is the per-session override (CLI > STT_HOTWORDS env > config default).
+    # `args.hotwords is None` means "not passed" -> Transcriber falls back to settings itself.
+    transcriber = Transcriber(hotwords=args.hotwords)
 
     gate_remote = ChannelGate(webrtcvad.Vad(settings.VAD_AGGRESSIVENESS), "remote")
     gate_mic = ChannelGate(webrtcvad.Vad(settings.VAD_AGGRESSIVENESS), "mic")
 
     segmenter: VadSegmenter | FixedSegmenter
     if args.segmentation == "vad":
-        segmenter = VadSegmenter(frame_seconds=frame_seconds)
+        # --mic-only forces every segment to "you": there is no remote channel, and the whole
+        # capture is the candidate practising. None (the default) leaves the two-stream vote intact.
+        segmenter = VadSegmenter(
+            frame_seconds=frame_seconds, force_speaker="you" if mic_only else None
+        )
         policy = (
             f"VAD(aggr={settings.VAD_AGGRESSIVENESS}) pause>={settings.SEGMENT_SILENCE_SECONDS}s "
             f"min={settings.SEGMENT_MIN_SECONDS}s max={settings.SEGMENT_MAX_SECONDS}s"
@@ -985,16 +1016,20 @@ def run_loop(args: argparse.Namespace) -> int:
     run_id = f"{datetime.now(timezone.utc):%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}"
     stamp = f"{datetime.now():%Y%m%d_%H%M%S}"
     start_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    channels = 2 if mic_name else 1
+    # mic-only is a single MONO stream (the mic); the two-stream path stays stereo when a mic
+    # is present so L=remote/R=mic separability (D19) is unchanged.
+    channels = 1 if mic_only else (2 if mic_name else 1)
     header = (
         f"# interview_copilot live transcript\n"
         f"# run_id     : {run_id}\n"
         f"# started    : {datetime.now():%Y-%m-%d %H:%M:%S}\n"
-        f"# remote src : {remote_name}\n"
+        f"# mode       : {'mic-only practice (all lines you)' if mic_only else 'call (them + you)'}\n"
+        f"# remote src : {remote_name or '(none — mic-only)'}\n"
         f"# mic src    : {mic_name or '(none)'}\n"
         f"# segmentation: {policy}\n"
         f"# provisional : {partial_policy}\n"
-        f"# model      : {settings.STT_MODEL} lang={settings.STT_LANGUAGE} beam={settings.STT_BEAM_SIZE}\n"
+        f"# model      : {settings.STT_MODEL} lang={settings.STT_LANGUAGE} beam={settings.STT_BEAM_SIZE} "
+        f"hotwords={'off' if not transcriber.hotwords else str(transcriber.hotwords.count(',') + 1) + ' terms'}\n"
         f"# D11: recording disclosed to the other party. Delete the WAV after scoring.\n"
         f"# (timestamps are mm:ss from run start; the _plain_ file is the scorer input)\n"
     )
@@ -1048,14 +1083,22 @@ def run_loop(args: argparse.Namespace) -> int:
             logger.info("self-test: playing %s into sink %s", args.selftest_wav, args.selftest_sink)
 
         if wav_input is None:
-            streams.append(ParecStream(remote_name, frame_bytes, "remote"))
-            if mic_name:
+            if mic_only:
+                # ONE mono stream: the mic occupies stream[0], so mic_frame stays None and the
+                # loop mixes/writes it as mono exactly like a single-source monitor capture.
                 streams.append(ParecStream(mic_name, frame_bytes, "mic"))
+            else:
+                streams.append(ParecStream(remote_name, frame_bytes, "remote"))
+                if mic_name:
+                    streams.append(ParecStream(mic_name, frame_bytes, "mic"))
 
         # Show the resolved sources: `auto` picks the DEFAULT input, which on this box
         # is the webcam mic, not your external mic. Check this line before the call starts.
-        print(f"\n  them (monitor) : {remote_name}")
-        print(f"  you   (mic)    : {mic_name or '(none — your own voice will NOT be recorded)'}")
+        if mic_only:
+            print(f"\n  you   (mic)    : {mic_name}   <- practice monologue, every line tagged 'you'")
+        else:
+            print(f"\n  them (monitor) : {remote_name}")
+            print(f"  you   (mic)    : {mic_name or '(none — your own voice will NOT be recorded)'}")
         print(f"  segmentation   : {policy}")
         print("\nREADY — listening. Speak or start the call. Ctrl-C to stop.\n", flush=True)
 
@@ -1226,7 +1269,9 @@ def main() -> None:
     parser.add_argument("--list", action="store_true", help="list capture sources and exit")
     parser.add_argument("--source", default="auto", help="monitor source to capture (default: auto = default sink's monitor)")
     parser.add_argument("--mic", default="auto", help="microphone source (default: auto = default input)")
-    parser.add_argument("--no-mic", action="store_true", help="capture the monitor only (your own voice will NOT be recorded)")
+    mic_mode = parser.add_mutually_exclusive_group()
+    mic_mode.add_argument("--no-mic", action="store_true", help="capture the monitor only (your own voice will NOT be recorded)")
+    mic_mode.add_argument("--mic-only", action="store_true", help="practice monologue: capture ONLY the mic as mono, skip monitor resolution, tag every segment 'you' (--source is ignored)")
     parser.add_argument("--seconds", type=float, default=0.0, help="auto-stop after N seconds (0 = run until Ctrl-C)")
     parser.add_argument("--latency-trace", default="", metavar="FILE",
                         help="#428: write one JSONL row per final segment with its close->write latency")
@@ -1241,6 +1286,10 @@ def main() -> None:
     parser.add_argument("--no-record", action="store_true", help="do not write the audio WAV (offline scoring runs)")
     parser.add_argument("--selftest-sink", help="no-human proof: play --selftest-wav into this SINK and capture its .monitor")
     parser.add_argument("--selftest-wav", default=str(OUTPUT_DIR / "piper_test.wav"), help="WAV used by --selftest-sink")
+    parser.add_argument("--hotwords", default=None, metavar="TERMS",
+                        help="#324: comma list of jargon terms to bias STT toward for this session "
+                             "(e.g. a bundle's own JD terms); CLI > STT_HOTWORDS env > config default "
+                             "(default: unset = use STT_HOTWORDS, itself empty = today's behaviour)")
     args = parser.parse_args()
 
     if args.list:

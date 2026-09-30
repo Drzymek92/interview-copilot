@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#12151b">
+<title>Interview copilot</title>
+<link rel="stylesheet" href="/static/app.css">
+<!-- D35 hub menu. SI2/D11: the disclosure in the top bar is permanent on every page. -->
+</head>
+<body>
+<header class="topbar">
+  <h1>Interview copilot</h1>
+  <span class="sep">·</span>
+  <span class="disclosure-tag">Disclosed AI assistance (D11)</span>
+  <span class="sep">·</span>
+  <span class="meta">Local only — bound to <code translate="no">127.0.0.1</code>, nothing leaves this machine unless you pick a cloud backend</span>
+</header>
+
+<div class="page">
+  <main class="narrow" style="max-width: 900px">
+    <h2 class="visually-hidden">What do you want to do?</h2>
+    <p class="page-title">What are we doing?</p>
+    <p class="page-lede">Pick one. Each screen is about that one job, and has its own ⚙ settings.</p>
+
+    <div id="running" class="banner capture" hidden role="status">
+      <span class="grow" id="running-text"></span>
+      <a class="btn primary small" id="running-go" href="/call">Return</a>
+      <button type="button" class="btn danger small" id="running-stop">End it</button>
+    </div>
+    <div id="jobs" class="banner" hidden role="status"><span class="grow" id="jobs-text"></span></div>
+
+    <nav class="menu-grid" aria-label="Modes">
+      <a class="tile call" href="/call">
+        <span class="tile-ic" aria-hidden="true">☎</span>
+        <span>
+          <span class="tile-title" style="display:block">Start a call</span>
+          <span class="tile-desc" style="display:block">Live copilot beside Teams: transcript, answer suggestions, interview plan.</span>
+          <span class="tile-meta" style="display:block" id="meta-call"></span>
+        </span>
+      </a>
+      <a class="tile train" href="/train">
+        <span class="tile-ic" aria-hidden="true">◎</span>
+        <span>
+          <span class="tile-title" style="display:block">Train for a call</span>
+          <span class="tile-desc" style="display:block">Mock interview: one question at a time, answer out loud, get a scorecard.</span>
+          <span class="tile-meta" style="display:block" id="meta-train"></span>
+        </span>
+      </a>
+      <a class="tile review" href="/review">
+        <span class="tile-ic" aria-hidden="true">✎</span>
+        <span>
+          <span class="tile-title" style="display:block">Review a call</span>
+          <span class="tile-desc" style="display:block">Grade the answers you gave in a real interview against your CV and the job.</span>
+          <span class="tile-meta" style="display:block" id="meta-review"></span>
+        </span>
+      </a>
+      <a class="tile generate" href="/generate">
+        <span class="tile-ic" aria-hidden="true">✦</span>
+        <span>
+          <span class="tile-title" style="display:block">Generate context</span>
+          <span class="tile-desc" style="display:block">Job description + your CV (paste or PDF) → a context bundle every mode can use.</span>
+          <span class="tile-meta" style="display:block" id="meta-generate"></span>
+        </span>
+      </a>
+      <a class="tile settings" href="/settings">
+        <span class="tile-ic" aria-hidden="true">⚙</span>
+        <span>
+          <span class="tile-title" style="display:block; font-size:15px">Settings</span>
+          <span class="tile-desc" style="display:block">Microphone and Teams audio, models, cloud backend, languages.</span>
+        </span>
+      </a>
+    </nav>
+
+    <div class="status-strip" id="status" aria-label="System status"></div>
+  </main>
+</div>
+
+<script src="/static/common.js"></script>
+<script>
+"use strict";
+function paintLive(s) {
+  // a running capture mode, so a stray refresh or a closed tab never hides live capture
+  const a = s.active;
+  el("running").hidden = !a;
+  if (a) {
+    el("running-text").textContent = (a.mode === "call" ? "A call" : "A training session") + " is open on bundle “" + a.session + "”"
+      + (a.capturing ? " — the microphone is capturing." : " — not capturing.");
+    el("running-go").href = a.mode === "call" ? "/call" : "/train";
+  }
+  const jobs = Object.values(s.jobs || {}).filter(Boolean);
+  el("jobs").hidden = !jobs.length;
+  if (jobs.length) el("jobs-text").textContent = jobs.map((j) => "⏳ " + j.kind + " running (" + j.label + ", " + Math.round(j.elapsed) + " s)").join(" · ");
+
+  const strip = el("status");
+  strip.textContent = "";
+  const o = s.ollama || {};
+  const loaded = (o.loaded || []).includes(s.local_model);
+  strip.append(
+    h("span", {}, "Local model ", h("b", { text: s.local_model || "?" }), " — ",
+      h("span", { class: o.reachable ? (loaded ? "ok-text" : "") : "bad-text",
+        text: o.reachable ? (loaded ? "loaded" : "not loaded yet (first answer is slower)") : "Ollama not reachable" })),
+    h("span", {}, "Cloud ", h("b", { text: s.cloud_available ? "available (opt-in)" : "not configured" })),
+    h("span", {}, "Mic ", h("b", { text: s.mic || "?" }),
+      s.mic === "auto" ? h("span", { class: "warn-text", text: " ⚠ picks the webcam — set it in Settings" }) : null),
+    h("span", {}, "Teams audio ", h("b", { text: s.source || "?" })));
+}
+
+async function paint() {
+  const [st, se, iv] = await Promise.all([api("/api/status"), api("/api/sessions"), api("/api/interviews")]);
+  paintLive(st.data || {});
+  const sessions = (se.data && se.data.sessions) || [];
+  const real = sessions.filter((x) => x.ok && x.id !== "blank" && !x.default);
+  el("meta-call").textContent = real.length + " context bundle" + (real.length === 1 ? "" : "s") + " + the generic default";
+  const withQ = real.filter((x) => x.questions > 0).length;
+  el("meta-train").textContent = withQ ? withQ + " bundle" + (withQ === 1 ? " has" : "s have") + " a practice question bank" : "questions are generated from the bundle's plan";
+  const ints = (iv.data && iv.data.interviews) || [];
+  const reps = (iv.data && iv.data.reports) || [];
+  el("meta-review").textContent = ints.length
+    ? ints.length + " captured interview" + (ints.length === 1 ? "" : "s") + " · " + reps.length + " report" + (reps.length === 1 ? "" : "s")
+    : "no captured interviews yet";
+  el("meta-generate").textContent = "takes about a minute on the local model";
+}
+
+el("running-stop").addEventListener("click", async () => {
+  if (!confirm("End the running session? Capture stops and the microphone is released.")) return;
+  await api("/api/mode/stop", { method: "POST" });
+  paint();
+});
+paint();
+// only the live bits refresh (running mode, jobs, model); bundles and captures are read once
+setInterval(async () => paintLive((await api("/api/status")).data || {}), 5000);
+</script>
+</body>
+</html>

@@ -81,6 +81,126 @@ def test_monitor_only_run_never_mislabels_as_you():
     assert all(s.speaker == "them" for s in out)
 
 
+# ==========================================================================
+# --mic-only (practice monologue, #649): mic-only mono capture, every line "you"
+# ==========================================================================
+def test_mic_only_forces_you_even_when_the_remote_vote_dominates():
+    """(a) force_speaker short-circuits the vote: a segment whose votes are all on the REMOTE
+    channel (which would normally tag 'them') is still tagged 'you' under --mic-only."""
+    seg = lt.VadSegmenter(frame_seconds=FRAME_S, force_speaker="you")
+    out = _drive(seg, [(True, False, _speech_frames()), (False, False, SILENCE_FRAMES)])
+    assert len(out) == 1
+    assert out[0].speaker == "you"          # remote_votes dominated, yet forced to "you"
+
+
+def test_mic_only_snapshot_is_also_forced_to_you():
+    """The provisional path must agree with the final: a snapshot under a forced speaker is
+    tagged the same 'you', not the vote-derived tag."""
+    seg = lt.VadSegmenter(frame_seconds=FRAME_S, force_speaker="you")
+    now = 0.0
+    for _ in range(40):
+        now += FRAME_S
+        seg.push(_loud_frame(), True, False, now)   # remote-only votes
+    snap = seg.snapshot(now)
+    assert snap is not None and snap.speaker == "you"
+
+
+def test_default_segmenter_is_unchanged_when_force_speaker_is_none():
+    """The two-stream path is behaviourally unchanged: with no forced speaker the vote decides."""
+    seg = lt.VadSegmenter(frame_seconds=FRAME_S)   # force_speaker defaults to None
+    out = _drive(seg, [(True, False, _speech_frames()), (False, False, SILENCE_FRAMES)])
+    assert out[0].speaker == "them"
+
+
+class _NullTranscriber:
+    """A Transcriber() stand-in for run_loop: instantiable, never actually decodes (the fake
+    capture streams die immediately, so no segment reaches it)."""
+
+    def __init__(self, hotwords=None, **_kw):  # noqa: ANN001
+        self.hotwords = hotwords or ""  # #324: run_loop's header line reads this
+
+    def transcribe_array(self, audio, sample_rate):  # noqa: ANN001, ARG002
+        return _Result("")
+
+
+class _DeadStream:
+    """A ParecStream double that is 'dead' from the first read, so run_loop's all-streams-died
+    guard breaks the capture loop on the first iteration — no real audio, no GPU."""
+
+    def __init__(self, source, frame_bytes, label):  # noqa: ANN001, ARG002
+        self.dead = True
+        self._frame_bytes = frame_bytes
+
+    def read(self) -> bytes:
+        return b"\x00" * self._frame_bytes
+
+    def close(self) -> None:
+        pass
+
+
+def _run_loop_args(**over):
+    import argparse
+    base = dict(
+        list=False, source="auto", mic="auto", no_mic=False, mic_only=False,
+        seconds=0.0, latency_trace="", segmentation="vad", fixed_seconds=8.0,
+        overlap_seconds=0.0, dedupe=True, partials=False, partial_seconds=0.0,
+        from_wav=None, pace=0.0, no_record=False, selftest_sink=None,
+        selftest_wav="x.wav", hotwords=None,
+    )
+    base.update(over)
+    return argparse.Namespace(**base)
+
+
+def _patch_capture_env(monkeypatch, tmp_path, *, monitor_raises=False):
+    import scripts.stt as stt
+    monkeypatch.setattr(lt, "OUTPUT_DIR", tmp_path)
+    # run_loop's closing summary prints plain_path.relative_to(PROJECT_ROOT); keep them aligned
+    # so the test's out-of-tree OUTPUT_DIR does not trip that display line.
+    monkeypatch.setattr(lt, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(lt, "RUNS_CSV", tmp_path / "runs.csv")
+    monkeypatch.setattr(lt.shutil, "which", lambda name: "/usr/bin/parec")
+    monkeypatch.setattr(lt, "source_names", lambda: ["mic.src"])
+    monkeypatch.setattr(lt, "default_mic", lambda: "mic.src")
+    monkeypatch.setattr(stt, "Transcriber", _NullTranscriber)
+    monkeypatch.setattr(lt, "ParecStream", _DeadStream)
+
+    def _monitor():
+        if monitor_raises:
+            raise AssertionError("default_monitor must NOT be called under --mic-only")
+        return None
+    monkeypatch.setattr(lt, "default_monitor", _monitor)
+
+
+def test_mic_only_run_loop_skips_monitor_resolution_entirely(tmp_path, monkeypatch):
+    """(b) No monitor is available (default_monitor returns None) AND it must never even be
+    consulted; the hard `return 2` for a missing monitor must not fire under --mic-only."""
+    _patch_capture_env(monkeypatch, tmp_path, monitor_raises=True)
+    rc = lt.run_loop(_run_loop_args(mic_only=True))
+    assert rc != 2                                   # the missing-monitor return 2 did NOT fire
+
+
+def test_mic_only_run_loop_records_a_mono_wav(tmp_path, monkeypatch):
+    """(c) The capture channel count is 1: the WAV is opened mono, not the stereo L=remote/R=mic."""
+    import wave
+    _patch_capture_env(monkeypatch, tmp_path)
+    lt.run_loop(_run_loop_args(mic_only=True))
+    wavs = list(tmp_path.glob("live_audio_*.wav"))
+    assert len(wavs) == 1
+    with wave.open(str(wavs[0])) as w:
+        assert w.getnchannels() == 1
+
+
+def test_two_stream_run_loop_still_records_stereo(tmp_path, monkeypatch):
+    """Guard the additive promise: a normal call with a mic still opens a 2-channel WAV."""
+    import wave
+    _patch_capture_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(lt, "default_monitor", lambda: "sink.monitor")
+    monkeypatch.setattr(lt, "source_names", lambda: ["sink.monitor", "mic.src"])
+    lt.run_loop(_run_loop_args())                    # not mic-only; mic auto-resolves
+    with wave.open(str(next(tmp_path.glob("live_audio_*.wav")))) as w:
+        assert w.getnchannels() == 2
+
+
 def test_write_line_puts_the_tag_on_transcript_but_not_the_plain_scorer_file(tmp_path, monkeypatch):
     monkeypatch.setattr(lt, "OUTPUT_DIR", tmp_path)  # keep the real scripts/outputs clean
     header = "# header\n"

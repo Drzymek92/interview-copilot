@@ -1,0 +1,473 @@
+{
+  "schema_version": 2,
+  "session_id": "default_ai_tech",
+  "role": "AI / ML Engineer (generic default)",
+  "company": "",
+  "notes": "DEFAULT bundle (D37): used by every mode when no bundle is selected. A generic AI tech job — typical AI/ML-engineer JD, interview plan and practice questions. No CV, no company, no STAR bank: suggestions stay generic and grading is not checked against a CV. Tracked template: config/bundles/default_ai_tech/bundle.json (seeded into scripts/inputs/sessions/ when missing).",
+  "job_description": "Generic AI / ML Engineer role (default bundle — not a real job ad).\n\nResponsibilities\n- Design, build and ship LLM-powered features: retrieval-augmented generation (RAG), agents and tool use, structured extraction.\n- Build evaluation: golden datasets, offline metrics, LLM-as-judge, regression tests, online monitoring.\n- Take prototypes to production: APIs, containers, CI/CD, observability, cost and latency budgets.\n- Work with data: pipelines, embeddings, vector search, data quality and privacy (GDPR).\n- Collaborate with product and engineering; explain trade-offs to non-specialists.\n\nRequirements\n- Strong Python; software-engineering fundamentals (testing, typing, code review, git).\n- Hands-on experience with LLM APIs or open models, prompt design, RAG and vector databases.\n- ML fundamentals: supervised learning, metrics, overfitting, data leakage, drift.\n- Cloud and deployment basics (Docker, a major cloud, REST/async services).\n- Clear communication in English (Polish a plus for local teams).\n\nNice to have\n- Agent frameworks (LangChain/LangGraph, LlamaIndex), fine-tuning (LoRA), MLOps tooling, tracing (Langfuse/OpenTelemetry).\n- Experience serving models on GPUs, caching and model routing for cost control.",
+  "company_brief": "",
+  "resume": "",
+  "answer_bank": [],
+  "plan": [
+    {
+      "id": "p1",
+      "title": "Introduction and your background",
+      "key_points": [
+        "30–60 s pitch: who you are, what you build, why this role",
+        "one headline achievement with a number"
+      ],
+      "done_signals": [
+        "tell me about yourself",
+        "introduce yourself",
+        "opowiedz o sobie",
+        "przedstaw się"
+      ]
+    },
+    {
+      "id": "p2",
+      "title": "Project deep dive",
+      "key_points": [
+        "your role and decisions, not the team's",
+        "stack, trade-offs, measurable result",
+        "what you'd do differently"
+      ],
+      "done_signals": [
+        "project",
+        "projekt",
+        "walk me through"
+      ]
+    },
+    {
+      "id": "p3",
+      "title": "LLMs, RAG and agents",
+      "key_points": [
+        "RAG pipeline end to end",
+        "evaluation and hallucination control",
+        "when agents vs fixed pipelines"
+      ],
+      "done_signals": [
+        "RAG",
+        "retrieval",
+        "agent",
+        "LLM",
+        "prompt"
+      ]
+    },
+    {
+      "id": "p4",
+      "title": "ML and engineering fundamentals",
+      "key_points": [
+        "bias/variance, metrics, drift",
+        "production code: tests, CI, monitoring"
+      ],
+      "done_signals": [
+        "overfitting",
+        "metric",
+        "production",
+        "testing"
+      ]
+    },
+    {
+      "id": "p5",
+      "title": "System design",
+      "key_points": [
+        "latency and cost levers: streaming, caching, routing",
+        "fallbacks and rate limits",
+        "back-of-envelope numbers"
+      ],
+      "done_signals": [
+        "design",
+        "scale",
+        "architecture",
+        "latency"
+      ]
+    },
+    {
+      "id": "p6",
+      "title": "Behavioural and your questions",
+      "key_points": [
+        "one STAR story about disagreement or failure",
+        "ask about team, stack, how success is measured"
+      ],
+      "done_signals": [
+        "questions for us",
+        "pytania do nas",
+        "disagree",
+        "conflict"
+      ]
+    }
+  ],
+  "honesty_boundary": [],
+  "question_bank": [
+    {
+      "id": "q1",
+      "competency": "Recent project",
+      "question": "Walk me through the most technically demanding AI/ML project you have shipped. What was your part, and what would you do differently?",
+      "language": "en",
+      "rubric": {
+        "criteria": [
+          {
+            "id": "ownership",
+            "label": "Ownership and concreteness",
+            "weight": 1.0,
+            "levels": {
+              "excellent": "Names the problem, their own decisions, the stack and a measurable outcome; reflects honestly on a mistake.",
+              "adequate": "Describes the project and their role, but outcomes or trade-offs stay vague.",
+              "weak": "Generic team story; unclear what they personally did or what resulted."
+            }
+          },
+          {
+            "id": "tradeoffs",
+            "label": "Technical trade-offs",
+            "weight": 1.0,
+            "levels": {
+              "excellent": "Explains at least one real alternative considered and why it lost (cost, latency, quality, data).",
+              "adequate": "Mentions choices but not why.",
+              "weak": "No trade-offs; presents the design as the only option."
+            }
+          },
+          {
+            "id": "clarity",
+            "label": "Structure and clarity",
+            "weight": 0.6,
+            "levels": {
+              "excellent": "Answers the question first, then supports it; a listener could repeat the main point.",
+              "adequate": "Understandable but meanders or buries the main point.",
+              "weak": "Hard to follow; no clear answer to what was asked."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "q2",
+      "competency": "LLM applications",
+      "question": "How would you build a question-answering assistant over a company's internal documents? Take me from ingestion to the answer on screen.",
+      "language": "en",
+      "rubric": {
+        "criteria": [
+          {
+            "id": "pipeline",
+            "label": "End-to-end RAG pipeline",
+            "weight": 1.0,
+            "levels": {
+              "excellent": "Covers parsing/chunking, embeddings, index, hybrid retrieval, reranking, prompt with citations, and access control.",
+              "adequate": "Covers retrieval + generation but skips chunking choices, reranking or permissions.",
+              "weak": "Just 'put the docs in the prompt' or 'fine-tune a model'."
+            }
+          },
+          {
+            "id": "failure",
+            "label": "Failure modes",
+            "weight": 0.8,
+            "levels": {
+              "excellent": "Names concrete failures (bad chunks, stale docs, hallucinated citations, prompt injection) and a mitigation for each.",
+              "adequate": "Mentions hallucination generally.",
+              "weak": "No failure modes."
+            }
+          },
+          {
+            "id": "clarity",
+            "label": "Structure and clarity",
+            "weight": 0.6,
+            "levels": {
+              "excellent": "Answers the question first, then supports it; a listener could repeat the main point.",
+              "adequate": "Understandable but meanders or buries the main point.",
+              "weak": "Hard to follow; no clear answer to what was asked."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "q3",
+      "competency": "Evaluation",
+      "question": "How do you know an LLM feature is good enough to ship, and how do you catch regressions after it ships?",
+      "language": "en",
+      "rubric": {
+        "criteria": [
+          {
+            "id": "metrics",
+            "label": "Evaluation design",
+            "weight": 1.0,
+            "levels": {
+              "excellent": "Separates retrieval and generation metrics, uses a labelled/golden set, LLM-as-judge with calibration, and online signals.",
+              "adequate": "Has a test set or human review but no clear metrics or regression process.",
+              "weak": "'We tried it and it looked good.'"
+            }
+          },
+          {
+            "id": "ops",
+            "label": "Monitoring and regression",
+            "weight": 0.8,
+            "levels": {
+              "excellent": "Versioned prompts/models, eval in CI, tracing, drift/feedback dashboards, rollback.",
+              "adequate": "Some logging or manual spot checks.",
+              "weak": "Nothing after launch."
+            }
+          },
+          {
+            "id": "clarity",
+            "label": "Structure and clarity",
+            "weight": 0.6,
+            "levels": {
+              "excellent": "Answers the question first, then supports it; a listener could repeat the main point.",
+              "adequate": "Understandable but meanders or buries the main point.",
+              "weak": "Hard to follow; no clear answer to what was asked."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "q4",
+      "competency": "Agents and tool use",
+      "question": "When would you use an agent with tools instead of a fixed pipeline, and how do you keep an agent reliable in production?",
+      "language": "en",
+      "rubric": {
+        "criteria": [
+          {
+            "id": "judgement",
+            "label": "When (not) to use agents",
+            "weight": 1.0,
+            "levels": {
+              "excellent": "Prefers deterministic pipelines where the path is known; uses agents for open-ended tasks, with cost/latency reasoning.",
+              "adequate": "Knows what agents are but not when they are the wrong tool.",
+              "weak": "Agents for everything."
+            }
+          },
+          {
+            "id": "reliability",
+            "label": "Reliability controls",
+            "weight": 1.0,
+            "levels": {
+              "excellent": "Tool schemas and validation, step/iteration limits, timeouts, retries, guardrails, human-in-the-loop, tracing and evals of trajectories.",
+              "adequate": "Mentions a couple of guardrails.",
+              "weak": "No controls."
+            }
+          },
+          {
+            "id": "clarity",
+            "label": "Structure and clarity",
+            "weight": 0.6,
+            "levels": {
+              "excellent": "Answers the question first, then supports it; a listener could repeat the main point.",
+              "adequate": "Understandable but meanders or buries the main point.",
+              "weak": "Hard to follow; no clear answer to what was asked."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "q5",
+      "competency": "ML fundamentals",
+      "question": "Explain the bias–variance trade-off and how you would diagnose and fix a model that performs well offline but poorly in production.",
+      "language": "en",
+      "rubric": {
+        "criteria": [
+          {
+            "id": "concepts",
+            "label": "Fundamentals",
+            "weight": 1.0,
+            "levels": {
+              "excellent": "Correct explanation, links to over/underfitting, regularisation, data size; distinguishes it from distribution shift.",
+              "adequate": "Mostly correct, shallow.",
+              "weak": "Incorrect or confused."
+            }
+          },
+          {
+            "id": "debugging",
+            "label": "Production diagnosis",
+            "weight": 1.0,
+            "levels": {
+              "excellent": "Checks train/serve skew, data drift, leakage, label delay, segment-level metrics; proposes monitoring and retraining.",
+              "adequate": "Suggests retraining or more data without diagnosis.",
+              "weak": "No diagnostic approach."
+            }
+          },
+          {
+            "id": "clarity",
+            "label": "Structure and clarity",
+            "weight": 0.6,
+            "levels": {
+              "excellent": "Answers the question first, then supports it; a listener could repeat the main point.",
+              "adequate": "Understandable but meanders or buries the main point.",
+              "weak": "Hard to follow; no clear answer to what was asked."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "q6",
+      "competency": "System design",
+      "question": "Design a service that serves an LLM feature to 100k users a day. How do you handle latency, cost and outages of the model provider?",
+      "language": "en",
+      "rubric": {
+        "criteria": [
+          {
+            "id": "architecture",
+            "label": "Architecture",
+            "weight": 1.0,
+            "levels": {
+              "excellent": "Streaming, caching (prompt/semantic), batching, async queues, rate limits, model routing (small vs large), fallbacks.",
+              "adequate": "Reasonable service outline, few cost/latency levers.",
+              "weak": "Single synchronous call, no scaling thought."
+            }
+          },
+          {
+            "id": "numbers",
+            "label": "Back-of-envelope reasoning",
+            "weight": 0.8,
+            "levels": {
+              "excellent": "Estimates tokens/request, cost/day and QPS and uses them to justify choices.",
+              "adequate": "Some numbers, not used.",
+              "weak": "No quantitative reasoning."
+            }
+          },
+          {
+            "id": "clarity",
+            "label": "Structure and clarity",
+            "weight": 0.6,
+            "levels": {
+              "excellent": "Answers the question first, then supports it; a listener could repeat the main point.",
+              "adequate": "Understandable but meanders or buries the main point.",
+              "weak": "Hard to follow; no clear answer to what was asked."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "q7",
+      "competency": "Data and privacy",
+      "question": "A client wants an AI feature over customer data that must not leave the EU. What changes in your design?",
+      "language": "en",
+      "rubric": {
+        "criteria": [
+          {
+            "id": "privacy",
+            "label": "Data protection",
+            "weight": 1.0,
+            "levels": {
+              "excellent": "Data residency, self-hosted or EU-region models, PII redaction, retention, access control, DPA/GDPR awareness.",
+              "adequate": "Mentions GDPR or anonymisation without design consequences.",
+              "weak": "Ignores the constraint."
+            }
+          },
+          {
+            "id": "clarity",
+            "label": "Structure and clarity",
+            "weight": 0.6,
+            "levels": {
+              "excellent": "Answers the question first, then supports it; a listener could repeat the main point.",
+              "adequate": "Understandable but meanders or buries the main point.",
+              "weak": "Hard to follow; no clear answer to what was asked."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "q8",
+      "competency": "Coding and engineering",
+      "question": "How do you take a notebook prototype to production-quality code? What does 'done' mean for you?",
+      "language": "en",
+      "rubric": {
+        "criteria": [
+          {
+            "id": "engineering",
+            "label": "Engineering practice",
+            "weight": 1.0,
+            "levels": {
+              "excellent": "Modular code, typing, tests (incl. for prompts/evals), config, logging, CI/CD, packaging, reproducibility, code review.",
+              "adequate": "Some practices, unsystematic.",
+              "weak": "Ships the notebook."
+            }
+          },
+          {
+            "id": "pragmatism",
+            "label": "Pragmatism",
+            "weight": 0.6,
+            "levels": {
+              "excellent": "Scales rigour to risk; knows what to skip for a spike.",
+              "adequate": "Either over- or under-engineers without saying why.",
+              "weak": "No sense of trade-off."
+            }
+          },
+          {
+            "id": "clarity",
+            "label": "Structure and clarity",
+            "weight": 0.6,
+            "levels": {
+              "excellent": "Answers the question first, then supports it; a listener could repeat the main point.",
+              "adequate": "Understandable but meanders or buries the main point.",
+              "weak": "Hard to follow; no clear answer to what was asked."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "q9",
+      "competency": "Collaboration",
+      "question": "Tell me about a time you disagreed with a stakeholder or teammate about a technical approach. What happened?",
+      "language": "en",
+      "rubric": {
+        "criteria": [
+          {
+            "id": "star",
+            "label": "Situation–action–result",
+            "weight": 1.0,
+            "levels": {
+              "excellent": "Clear situation, their own actions, the result, and what they learned; stays respectful.",
+              "adequate": "A real story missing the result or their own role.",
+              "weak": "Hypothetical or blames others."
+            }
+          },
+          {
+            "id": "clarity",
+            "label": "Structure and clarity",
+            "weight": 0.6,
+            "levels": {
+              "excellent": "Answers the question first, then supports it; a listener could repeat the main point.",
+              "adequate": "Understandable but meanders or buries the main point.",
+              "weak": "Hard to follow; no clear answer to what was asked."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "q10",
+      "competency": "Motivation",
+      "question": "Why this kind of role, and what would you want to learn or own in your first six months?",
+      "language": "en",
+      "rubric": {
+        "criteria": [
+          {
+            "id": "fit",
+            "label": "Motivation and fit",
+            "weight": 1.0,
+            "levels": {
+              "excellent": "Specific motivations tied to the role's work; a concrete, realistic 6-month plan.",
+              "adequate": "Generic enthusiasm.",
+              "weak": "No clear motivation."
+            }
+          },
+          {
+            "id": "clarity",
+            "label": "Structure and clarity",
+            "weight": 0.6,
+            "levels": {
+              "excellent": "Answers the question first, then supports it; a listener could repeat the main point.",
+              "adequate": "Understandable but meanders or buries the main point.",
+              "weak": "Hard to follow; no clear answer to what was asked."
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

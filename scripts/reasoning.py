@@ -56,7 +56,7 @@ from scripts.llm_client import (  # noqa: E402
     BackendUnavailable, LlmReply, StreamCancelled, announce_backend, llm_call, model_for, resolve_backend,
 )
 from scripts.logger import get_logger  # noqa: E402
-from scripts.salience import SalienceGate  # noqa: E402
+from scripts.salience import SalienceGate, split_sentences  # noqa: E402
 
 logger = get_logger("reasoning")
 
@@ -124,6 +124,84 @@ class HonestyClaim:
 
 
 @dataclass
+class Tactic:
+    """One user-authored strategic instruction — not a fact about the candidate, an
+    instruction about HOW to use one (#324 fix 5, review 2026-09-14).
+
+    Review finding: a coaching note living as prose inside `company_brief`/`job_description`
+    ("Do not point this out as a gap. Turn it into the best question: ...") was not reflected
+    in the live suggestion at the exact turn it anticipated (id17) — the model may or may not
+    weight prose instructions buried in background material. Giving tactics their own tagged
+    system-prompt block (`_tactics_block`) makes them a first-class instruction instead."""
+
+    topic: str
+    note: str
+
+    def as_prompt_block(self) -> str:
+        return f"- [{self.topic}] {self.note}"
+
+
+# --- Question + rubric bank (D30) — the offline practice track's interview-side content ---
+# A generated, deterministic-shaped block: `generate_context.py` authors it from the JD and
+# `training.py` grades spoken answers against it. Only the *judgement* is an LLM call; the rubric
+# structure is fixed (CLAUDE.md Determinism First). Optional like honesty_boundary — a bundle
+# without it loads with an empty bank and the live copilot ignores it entirely.
+RUBRIC_LEVELS = ("excellent", "adequate", "weak")
+RUBRIC_LEVEL_SCORE = {"excellent": 2.0, "adequate": 1.0, "weak": 0.0, "missing": 0.0}
+
+
+@dataclass
+class RubricCriterion:
+    """One scored dimension of an answer. `levels` describes what earns each band so the grader
+    (and a human reading the report) sees the same yardstick."""
+
+    id: str
+    label: str
+    weight: float = 1.0
+    levels: dict[str, str] = field(default_factory=dict)  # RUBRIC_LEVELS -> descriptor
+
+
+@dataclass
+class Rubric:
+    criteria: list[RubricCriterion] = field(default_factory=list)
+
+    def max_score(self) -> float:
+        """Deterministic ceiling: each criterion tops out at 'excellent' (2.0) x its weight."""
+        return sum(RUBRIC_LEVEL_SCORE["excellent"] * c.weight for c in self.criteria)
+
+
+@dataclass
+class Question:
+    """One mock-interview question with its scoring rubric."""
+
+    id: str
+    competency: str
+    question: str
+    language: str = "en"
+    rubric: Rubric = field(default_factory=Rubric)
+
+
+def _parse_question(index: int, raw: dict) -> Question:
+    rubric_raw = raw.get("rubric") or {}
+    criteria = [
+        RubricCriterion(
+            id=str(c.get("id", f"c{j}")),
+            label=str(c.get("label", "")),
+            weight=float(c.get("weight", 1.0)),
+            levels={str(k): str(v) for k, v in (c.get("levels") or {}).items()},
+        )
+        for j, c in enumerate(rubric_raw.get("criteria", []))
+    ]
+    return Question(
+        id=str(raw.get("id", f"q{index}")),
+        competency=str(raw.get("competency", "")),
+        question=str(raw.get("question", "")),
+        language=str(raw.get("language", "en")),
+        rubric=Rubric(criteria=criteria),
+    )
+
+
+@dataclass
 class ContextBundle:
     """Everything the reasoning layer knows before a word is spoken."""
 
@@ -140,6 +218,12 @@ class ContextBundle:
     honesty_boundary: list[HonestyClaim]
     placeholders: list[str]
     source_dir: Path
+    # D30 — offline practice track. Empty for a live-interview bundle; the live copilot never
+    # reads it. Populated by generate_context.py and consumed by training.py.
+    question_bank: list[Question] = field(default_factory=list)
+    # #324 fix 5 — OPTIONAL. A bundle without this key loads with an empty list, exactly like
+    # question_bank/honesty_boundary before it: schema stays v2, old bundles load unchanged.
+    tactics: list[Tactic] = field(default_factory=list)
 
     def warn_lines(self) -> list[str]:
         """Named-as-placeholder sections. Printed at load so a fixture is never mistaken
@@ -170,6 +254,19 @@ def _read_part(session_dir: Path, spec: object, label: str, placeholders: list[s
             raise FileNotFoundError(f"bundle section {label!r} points at a missing file: {path}")
         text = path.read_text(encoding="utf-8").strip()
     return text
+
+
+def _list_section(raw_value: object, label: str, placeholders: list[str]) -> list:
+    """A list-shaped bundle section (answer_bank, honesty_boundary) is normally a JSON list of
+    real content. `generate_context.py` (D30) instead writes a `{"status": "placeholder"}` marker
+    for a candidate-side section it must not synthesize (D22). Recognise that marker the way
+    `_read_part` does for text sections — record the placeholder and yield an empty list — while
+    a plain list (every bundle authored before this tool) passes straight through unchanged."""
+    if isinstance(raw_value, dict):
+        if raw_value.get("status") == "placeholder":
+            placeholders.append(label)
+        return []
+    return list(raw_value or [])
 
 
 def load_bundle(session: str, sessions_dir: Path | None = None) -> ContextBundle:
@@ -226,7 +323,7 @@ def load_bundle(session: str, sessions_dir: Path | None = None) -> ContextBundle
                 action=str(e.get("action", "")),
                 result=str(e.get("result", "")),
             )
-            for i, e in enumerate(raw.get("answer_bank", []))
+            for i, e in enumerate(_list_section(raw.get("answer_bank"), "answer_bank", placeholders))
         ],
         plan=[
             PlanStep(
@@ -239,15 +336,21 @@ def load_bundle(session: str, sessions_dir: Path | None = None) -> ContextBundle
         ],
         honesty_boundary=[
             HonestyClaim(claim=str(h.get("claim", "")), truth=str(h.get("truth", "")))
-            for h in raw.get("honesty_boundary", [])
+            for h in _list_section(raw.get("honesty_boundary"), "honesty_boundary", placeholders)
         ],
         placeholders=placeholders,
         source_dir=session_dir,
+        question_bank=[_parse_question(i, q) for i, q in enumerate(raw.get("question_bank", []))],
+        tactics=[
+            Tactic(topic=str(t.get("topic", "")), note=str(t.get("note", "")))
+            for t in _list_section(raw.get("tactics"), "tactics", placeholders)
+        ],
     )
     logger.info(
-        "bundle %s loaded | role=%r company=%r | %d STAR, %d plan steps, %d honesty rows | placeholders: %s",
+        "bundle %s loaded | role=%r company=%r | %d STAR, %d plan steps, %d honesty rows, "
+        "%d practice questions | placeholders: %s",
         bundle.session_id, bundle.role, bundle.company, len(bundle.answer_bank), len(bundle.plan),
-        len(bundle.honesty_boundary), ", ".join(placeholders) or "none",
+        len(bundle.honesty_boundary), len(bundle.question_bank), ", ".join(placeholders) or "none",
     )
     return bundle
 
@@ -268,9 +371,20 @@ PL_INTERROGATIVE_PREFIXES = (
 # Stems, not exact forms: the same request arrives as an imperative ("opowiedz") or an
 # infinitive after `prosze` ("prosze wyjasnic"), and Polish inflects both.
 PL_PROMPT_VERBS = (
-    "opowied", "powiedz", "wyjasn", "wytlumacz", "opis", "podaj", "przedstaw",
+    # "opowi" (not "opowied"): covers the imperative/infinitive family ("opowiedz",
+    # "opowiedzieć") AND the perfective-future 3rd person ("opowie", "on/Pan opowie") that
+    # "niech Pan opowie" uses (#324 fix 1) — "opowiedzieć" drops its "d" in exactly that
+    # conjugation ("opowiem, opowiesz, opowie, opowiemy..."), so the longer stem missed it.
+    "opowi", "powiedz", "wyjasn", "wytlumacz", "opis", "podaj", "przedstaw",
     "omow", "porown", "zaproponuj", "przybliz", "wymien", "pokaz",
 )
+# "niech Pan/Pani <...> opowie" ("let Mr./Ms. tell us...") is Polish's other common indirect
+# imperative, and the marker is routinely followed by a filler ("troche") or the addressee
+# noun before the verb lands — "niech Pan opowie" alone already puts the verb at word index 2,
+# past the words[:2] window a bare prompt verb is checked in. Once the marker itself is seen,
+# the (short, single-sentence) tail after it is searched for the verb stem instead of only its
+# first two words — #324 fix 1's exact miss ("moze niech Pan troche opowie o swoim doswiadczeniu").
+PL_INDIRECT_IMPERATIVE_MARKERS = ("niech",)
 EN_WH_WORDS = ("what", "how", "why", "when", "where", "which", "who", "whom", "whose")
 # Auxiliaries only ask a question by SUBJECT INVERSION, which puts them first ("Do you...",
 # "Would you..."). Accepted anywhere in the first three words they also match ordinary
@@ -324,13 +438,54 @@ def detect_text_language(text: str) -> str:
     return "en"
 
 
+def _sentence_opens_with_prompt_verb(sentence: str) -> bool:
+    """Does THIS sentence open with an answer-requesting imperative? (#324 fix 1)
+
+    Deliberately narrower than the full `looks_like_question` rule: only the imperative /
+    prompt-verb branch is re-run per sentence, never the interrogative-prefix branch. A bare
+    interrogative (`jak`/`co`/`czy`) is an everyday Polish subordinating conjunction ("nie
+    wiem, co...", "nie wiadomo, czy...") and re-checking it at the head of every sentence in
+    a multi-sentence monologue segment turns the rule into a spam generator — measured: doing
+    that unscoped introduced 11 new false fires on a real-interview transcript (see reasoning.md).
+    An answer-requesting imperative doesn't have that failure mode: it names an ADDRESSEE
+    action ("opowiedz", "niech Pan opowie"), which essentially never appears embedded inside
+    an unrelated statement.
+    """
+    words = _tokens(sentence)
+    if not words:
+        return False
+    if any(tuple(words[: len(opener)]) == opener for opener in PL_NOT_QUESTION_OPENERS):
+        return False
+    if words[0] in PL_FIRST_PERSON_INTENT:
+        return False
+    if any(w.startswith(PL_PROMPT_VERBS) or w in EN_PROMPT_VERBS for w in words[:2]):
+        return True
+    # "niech Pan/Pani ... opowie" — see PL_INDIRECT_IMPERATIVE_MARKERS. Once the marker is
+    # found the verb stem is searched for in the rest of the sentence, not just its first
+    # two words: the marker itself, not position, is what makes this an imperative.
+    for marker in PL_INDIRECT_IMPERATIVE_MARKERS:
+        if marker in words:
+            tail = words[words.index(marker) + 1 :]
+            if any(w.startswith(PL_PROMPT_VERBS) for w in tail):
+                return True
+    return False
+
+
 def looks_like_question(text: str, min_words: int | None = None) -> bool:
     """Should the ambient loop spend a model call on this segment? (G6)
 
-    Fires on: an explicit `?`, an interrogative in the first three words, or an
-    answer-requesting imperative in the first two. Interrogatives are position-limited
-    on purpose — bare `jak` mid-sentence is 'as/like' ('tak jak w produkcji'), and
-    accepting it anywhere is what turns a cheap rule into a spam generator.
+    Fires on: an explicit `?`, an interrogative in the first three words (of the whole
+    segment), an answer-requesting imperative in the first two words (ditto), OR — #324 fix
+    1 — an answer-requesting imperative opening a LATER sentence merged into the same VAD
+    segment. Interrogatives stay position-limited against the WHOLE segment on purpose (see
+    `_sentence_opens_with_prompt_verb`'s docstring for why re-running that check per sentence
+    is a precision trap); only the narrower imperative check is re-run per sentence, using
+    the same splitter D23's `question_sentences` uses (`split_sentences`) rather than a
+    second one.
+
+    Reproduced miss this closes: "...ja musze Panu zadac kilka pytan... Wlasnie, moze niech
+    Pan troche opowie o swoim doswiadczeniu." — the imperative sits at word ~23 of the merged
+    segment (word 6 of its own, second, sentence), past every position window above.
     """
     floor = settings.SUGGESTION_MIN_WORDS if min_words is None else min_words
     words = _tokens(text)
@@ -349,7 +504,10 @@ def looks_like_question(text: str, min_words: int | None = None) -> bool:
         return True
     if words[0] in PL_FIRST_PERSON_INTENT:
         return False
-    return any(w.startswith(PL_PROMPT_VERBS) or w in EN_PROMPT_VERBS for w in words[:2])
+    if any(w.startswith(PL_PROMPT_VERBS) or w in EN_PROMPT_VERBS for w in words[:2]):
+        return True
+    sentences = split_sentences(text)
+    return any(_sentence_opens_with_prompt_verb(sentence) for sentence in sentences[1:])
 
 
 # --------------------------------------------------------------------------
@@ -404,6 +562,11 @@ under one follow-up question ends the process.
 
 === INTERVIEW PLAN ===
 {plan}
+
+=== STRATEGIC TACTICS — TREAT AS INSTRUCTIONS, NOT BACKGROUND ===
+Each line below is something the candidate decided IN ADVANCE about how to handle a specific \
+topic — not a fact to cite, an instruction to follow when that topic comes up.
+{tactics}
 
 {language_rule}
 """
@@ -468,6 +631,15 @@ def _plan_block(bundle: ContextBundle) -> str:
     return "\n".join(lines)
 
 
+def _tactics_block(bundle: ContextBundle) -> str:
+    """#324 fix 5 — optional, empty for every bundle authored before it (D30-style
+    backward compatibility: an absent/empty section renders a placeholder line, not a
+    missing template key)."""
+    if not bundle.tactics:
+        return "(none recorded)"
+    return "\n".join(t.as_prompt_block() for t in bundle.tactics)
+
+
 def resolve_languages(
     bundle: ContextBundle, segment: str,
     suggestion_language: str | None = None, spoken_language: str | None = None,
@@ -490,6 +662,28 @@ def resolve_languages(
     return spoken, configured
 
 
+# F1 / #1270 (e2e round 1, 2026-09-26): a bundle with NO honesty rows — every CV-only bundle Generate
+# writes (D22 keeps the boundary a placeholder) — let the model answer "Tak, mam doświadczenie" to a
+# time-series question the CV never mentions, and read a garbled "maszynaling" as machine TRANSLATION.
+# When the boundary is empty this generic rule stands in for it; a bundle with real rows is unchanged.
+EMPTY_HONESTY_RULE = """No specific claims are recorded for this candidate, so apply this rule to EVERY question:
+- The CANDIDATE RESUME and PREPARED ANSWERS below are the ONLY evidence of what the candidate has done. \
+A skill, tool, method or domain not named there is something they have NOT done professionally.
+- Claim EXACTLY the level the evidence shows — no more, no less. If it names X or a direct part of X \
+(a library, a project, a task), say that, at that level (e.g. scikit-learn listed → "yes, in my own \
+projects with scikit-learn, not in production"). If it is silent on X, say "not in production" or \
+"not professionally" — not a flat "never" — then bridge to the closest thing it DOES show, or to how \
+they would approach X. Never inflate, and never borrow an unrelated project as proof of X.
+- When the evidence has nothing on the topic of a "what did you use / how would you" question, the \
+POINT OPENS with "Not something I've done professionally — I'd…" (in the answer language) and continues \
+hypothetically from general knowledge. Never use the present or past tense for work the evidence does \
+not show, and never present an unrelated project or tool from the resume as the answer.
+- EVIDENCE must be a resume/answer-bank fact that DIRECTLY backs the POINT (the listed skill or the \
+project that actually did it); if none does, write "none".
+- Speech-to-text garbles technical words. Read a question in its most likely meaning for THIS role \
+(e.g. "maszynaling" = machine learning), never a literal but off-topic reading."""
+
+
 def build_messages(
     bundle: ContextBundle, segment: str, history: list[str] | None = None,
     suggestion_language: str | None = None, spoken_language: str | None = None,
@@ -502,7 +696,7 @@ def build_messages(
     system = SYSTEM_TEMPLATE.format(
         language_rule=language_rule(spoken_name, target_name),
         honesty_boundary="\n".join(h.as_prompt_block() for h in bundle.honesty_boundary)
-        or "(none recorded — do not infer one; ground answers in the resume and answer bank)",
+        or EMPTY_HONESTY_RULE,
         role=bundle.role or "(role not specified)",
         company=bundle.company or "(company not specified)",
         job_description=bundle.job_description or "(not loaded)",
@@ -510,6 +704,7 @@ def build_messages(
         resume=bundle.resume or "(not loaded)",
         answer_bank="\n".join(e.as_prompt_block() for e in bundle.answer_bank) or "(none)",
         plan=_plan_block(bundle),
+        tactics=_tactics_block(bundle),
     )
     user = USER_TEMPLATE.format(
         spoken_name=spoken_name,
@@ -848,7 +1043,11 @@ def run_ambient(
             continue
         if gate.active:
             logger.info("segment passed salience gate (%s)", verdict.log_line())
-        emit(kind="gate", stamp=stamp, fire=True, detail=verdict.log_line())
+        # `text`/`language` ride along so a consumer (the D32 Q&A pairer, wired as a make_sink
+        # consumer — D34) can bind the fired question straight off this event, rather than
+        # inferring "the last them: line".
+        emit(kind="gate", stamp=stamp, fire=True, detail=verdict.log_line(),
+             text=text, language=language)
 
         since = time.monotonic() - last_fire
         # The cooldown does NOT apply while a suggestion is still streaming: a genuinely new

@@ -182,6 +182,7 @@ class Transcriber:
         model_name: str | None = None,
         device: str | None = None,
         compute_type: str | None = None,
+        hotwords: str | None = None,
     ) -> None:
         # Deferred import so importing the module (e.g. for the dataclasses) does
         # not require faster-whisper to be installed.
@@ -190,12 +191,22 @@ class Transcriber:
         self.model_name = model_name or settings.STT_MODEL
         self.device = device or settings.STT_DEVICE
         self.compute_type = compute_type or settings.STT_COMPUTE_TYPE
+        # #324 jargon-bias knob (CLI > env > config, CFG). `hotwords=None` means "use the
+        # configured default" (settings.STT_HOTWORDS, itself env > "" default) — it does NOT
+        # mean "off"; pass `hotwords=""` explicitly to force off regardless of settings.
+        # DEFAULT = empty = today's behaviour exactly: see `_decode_once`, which omits the
+        # `hotwords` kwarg entirely (rather than passing `hotwords=None`) when this is empty,
+        # so the decode call is byte-identical to before this knob existed.
+        self.hotwords: str = (
+            ", ".join(settings.STT_HOTWORDS) if hotwords is None else hotwords
+        )
 
         logger.info(
-            "loading faster-whisper model=%s device=%s compute_type=%s",
+            "loading faster-whisper model=%s device=%s compute_type=%s hotwords=%s",
             self.model_name,
             self.device,
             self.compute_type,
+            f"{self.hotwords.count(',') + 1} term(s)" if self.hotwords else "off",
         )
         t0 = time.perf_counter()
         self.model = WhisperModel(
@@ -266,13 +277,24 @@ class Transcriber:
     def _decode_once(
         self, audio: np.ndarray, language: str, offset: float = 0.0
     ) -> list[TranscriptSegment]:
-        """One forced-language decode of `audio`, timestamps shifted by `offset`."""
-        segments_iter, _info = self.model.transcribe(
-            audio,
+        """One forced-language decode of `audio`, timestamps shifted by `offset`.
+
+        #324: the `hotwords` kwarg is added ONLY when the knob is non-empty, rather than
+        always passed (e.g. `hotwords=None`) — so with the knob at its default empty value
+        this call is byte-identical to the pre-#324 code, not merely behaviourally
+        equivalent. Every decode path (`_decode_once`, `_decode_rescored`, `_decode_split`)
+        routes through here, so all of them pick it up; `detect_language` (used for language
+        planning) is a separate model method that takes no such parameter, so hotwords can
+        never influence which language a segment is decoded in.
+        """
+        kwargs: dict = dict(
             beam_size=settings.STT_BEAM_SIZE,
             language=language,
             vad_filter=True,
         )
+        if self.hotwords:
+            kwargs["hotwords"] = self.hotwords
+        segments_iter, _info = self.model.transcribe(audio, **kwargs)
         # faster-whisper is lazy: decoding happens as the generator is consumed.
         return [
             TranscriptSegment(

@@ -59,7 +59,12 @@ try:
         _here.parents[3] / "config" / ".env",
     ):
         if _p.is_file():
+            _before = set(os.environ)
             load_dotenv(_p)
+            # D36: tell settings which keys only the dotenv supplied. A fresh process reads settings
+            # BEFORE this load, so a later `importlib.reload(settings)` (a UI settings save) must not
+            # start seeing them either — or a save would silently swap e.g. LOCAL_MODEL.
+            settings.DOTENV_KEYS.update(set(os.environ) - _before)
 except Exception:  # noqa: BLE001 — a missing dotenv must never block a local run
     pass
 
@@ -208,6 +213,7 @@ def get_llm(
     backend: str | None = None,
     model: str | None = None,
     temperature: float | None = None,
+    timeout: float | None = None,
     **kwargs: object,
 ) -> ChatOpenAI:
     chosen = resolve_backend(backend)
@@ -239,7 +245,9 @@ def get_llm(
         base_url=base_url,
         api_key=api_key,
         temperature=settings.REASONING_TEMPERATURE if temperature is None else temperature,
-        timeout=settings.REASONING_TIMEOUT_SECONDS,
+        # The 25 s default is sized for a ~220-token live suggestion; a batch generation or scoring
+        # call produces thousands of tokens and needs its own generous timeout (passed by the caller).
+        timeout=settings.REASONING_TIMEOUT_SECONDS if timeout is None else timeout,
         max_retries=0,  # a stale suggestion is worse than none — fail fast, next segment retries
         **kwargs,
     )
@@ -396,6 +404,7 @@ def llm_call(
     temperature: float | None = None,
     max_tokens: int | None = None,
     on_token: Callable[[str], None] | None = None,
+    timeout: float | None = None,
     **kwargs: object,
 ) -> LlmReply:
     """One metered completion. Raises BackendUnavailable when the server is unreachable.
@@ -407,12 +416,16 @@ def llm_call(
     chosen = resolve_backend(backend)
     if max_tokens is not None:
         # `max_tokens`, NOT `max_completion_tokens` — Ollama's OpenAI-compatible endpoint does
-        # not honour the newer name and will happily overrun the cap.
+        # not honour the newer name and will happily overrun the cap. This is still passed to
+        # `get_llm`/`ChatOpenAI` for the streaming local path and the cloud path; the
+        # non-streaming local path below bypasses `ChatOpenAI` entirely (#991) because that
+        # client renames `max_tokens` -> `max_completion_tokens` on the wire regardless of
+        # what key it was given.
         kwargs["max_tokens"] = max_tokens
     if on_token is not None:
         kwargs["stream_usage"] = True  # otherwise the streamed chunks carry no usage block
     llm = None if chosen == "cloud" else get_llm(
-        backend=chosen, model=model, temperature=temperature, **kwargs
+        backend=chosen, model=model, temperature=temperature, timeout=timeout, **kwargs
     )
     messages: list[SystemMessage | HumanMessage] = []
     if system:
@@ -434,6 +447,21 @@ def llm_call(
                 system, prompt, model or model_for("local"),
                 settings.REASONING_TEMPERATURE if temperature is None else temperature,
                 max_tokens, on_token,
+            )
+        elif chosen == "local" and max_tokens is not None and on_token is None:
+            # #991: `llm.invoke()` goes through langchain_openai's `ChatOpenAI`, which — since
+            # its Sept-2024 `max_tokens` -> `max_completion_tokens` rename (OpenAI deprecated
+            # the old name) — sends `max_completion_tokens` on the wire. Ollama's
+            # OpenAI-compatible endpoint silently ignores that name (and `options.num_predict`
+            # too) but DOES honour a literal `max_tokens` key. Measured 2026-09-23:
+            # `max_tokens=3` capped a long-form prompt to 3 completion tokens; the same cap
+            # sent as `max_completion_tokens` produced 2486, and as `options.num_predict`
+            # produced 3053. Reuse the raw-HTTP local path (already correct for streaming
+            # callers) with a no-op sink instead of going through ChatOpenAI.
+            text, usage, first_token, model_name = _stream_local(
+                system, prompt, model or model_for("local"),
+                settings.REASONING_TEMPERATURE if temperature is None else temperature,
+                max_tokens, lambda _piece: None,
             )
         elif on_token is None:
             resp = llm.invoke(messages)

@@ -76,6 +76,15 @@ logger = get_logger("salience")
 
 _SENTENCE_SPLIT = re.compile(r"(?<=[.?!])\s+")
 
+
+def split_sentences(text: str) -> list[str]:
+    """Split a (possibly VAD-merged, multi-sentence) segment into sentences.
+
+    The one splitter shared by D20 (`reasoning.looks_like_question`, per-sentence position
+    checks — #324 fix 1) and D23 (`question_sentences` below) — reused, not reinvented, per
+    review fix #1's own instruction."""
+    return [s.strip() for s in _SENTENCE_SPLIT.split(text) if s.strip()]
+
 JUDGE_SYSTEM = """You judge ONE turn from a job interview, spoken by the INTERVIEWER and \
 machine-transcribed (messy, may merge several sentences).
 Answer YES only if in this turn the interviewer ASKS THE CANDIDATE TO SAY SOMETHING — a \
@@ -120,7 +129,7 @@ def question_sentences(text: str, is_question: Callable[[str], bool] | None = No
     the judge only the interrogative sentences removes the distractors. Reuses D20's rule
     as the per-sentence predicate rather than inventing a second one.
     """
-    sentences = [s.strip() for s in _SENTENCE_SPLIT.split(text) if s.strip()]
+    sentences = split_sentences(text)
     if not sentences:
         return text
     predicate = is_question or (lambda s: "?" in s)

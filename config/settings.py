@@ -1,13 +1,71 @@
 """Non-secret runtime settings for interview_copilot (CFG).
 
-Precedence: CLI > env > config-default. Secrets never live here (D14 — provider
+Precedence: CLI > env > saved (config/user_settings.json, D36) > config-default. Secrets never live here (D14 — provider
 keys come from the environment). This module holds only tunables that Day-2/3/4
 will also read, so the STT model choice and audio params are settable in one place.
 """
 
 from __future__ import annotations
 
+import json
 import os
+from pathlib import Path
+
+# --- D36: the UI-saved settings layer (CLI > env > saved > default) ---
+# `config/user_settings.json` (gitignored, written by scripts/user_config.py from the hub's
+# Settings view) is folded in BELOW the environment: a saved value is exported into
+# os.environ only when the user did not set that variable themselves, so every read below (via `_ENV`)
+# sees it as if it were env, and recorder children inherit it. The snapshots survive
+# `importlib.reload(settings)` (reload reuses this module's globals), which is how a saved change
+# is applied at runtime without losing which keys were REALLY in the user's environment.
+ORIGINAL_ENV_KEYS: frozenset[str] = globals().get("ORIGINAL_ENV_KEYS") or frozenset(os.environ)
+_INJECTED: set[str] = globals().get("_INJECTED", set())
+# Keys that exist in os.environ only because scripts/llm_client.py loaded config/.env AFTER this module was
+# first imported (it records them here). A fresh process never saw them in settings, so a reload must not
+# either — every read below goes through `_ENV`, which leaves them out.
+DOTENV_KEYS: set[str] = globals().get("DOTENV_KEYS", set())
+USER_SETTINGS_FILE: Path = Path(
+    os.environ.get("COPILOT_USER_SETTINGS") or Path(__file__).with_name("user_settings.json")
+)
+# Never settable from the saved file, whatever it contains: the loopback bind is SI1's floor.
+_SAVED_DENY = frozenset({"DASHBOARD_HOST", "DASHBOARD_PORT", "COPILOT_USER_SETTINGS"})
+# ...nor anything credential-shaped (suffix match: `SUGGESTION_MAX_TOKENS` is a knob, not a token).
+_CREDENTIAL_SUFFIXES = ("_KEY", "_TOKEN", "_SECRET", "_PASSWORD")
+
+
+def load_saved_settings(path: Path | None = None) -> dict[str, str]:
+    """The saved layer as {ENV_NAME: string}. A missing or unreadable file is an empty layer —
+    a corrupt settings file must never stop the copilot from starting."""
+    target = path or USER_SETTINGS_FILE
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        str(k): str(v) for k, v in raw.items()
+        if str(k).isupper() and str(k) not in _SAVED_DENY
+        and not str(k).endswith(_CREDENTIAL_SUFFIXES)
+    }
+
+
+def _apply_saved_layer() -> None:
+    saved = load_saved_settings()
+    for name in list(_INJECTED):          # a value removed from the file stops applying
+        if name not in saved:
+            os.environ.pop(name, None)
+            _INJECTED.discard(name)
+    for name, value in saved.items():
+        if name in ORIGINAL_ENV_KEYS:     # an explicit env var always wins (D36)
+            continue
+        os.environ[name] = value
+        _INJECTED.add(name)
+        DOTENV_KEYS.discard(name)         # a saved value replaces a dotenv-only one
+
+
+_apply_saved_layer()
+_ENV: dict[str, str] = {k: v for k, v in os.environ.items() if k not in DOTENV_KEYS}
 
 # --- STT (D16 — local GPU faster-whisper) ---
 # The interview runs MOSTLY IN POLISH with English fragments (user, 2026-08-31),
@@ -25,17 +83,17 @@ import os
 # Both produced clean Polish; turbo is 2.6x faster and got "AI Engineer" right
 # where large-v3 said "AI Engineering". large-v3 stays the fallback if turbo
 # regresses on harder audio.
-STT_MODEL: str = os.environ.get("STT_MODEL", "large-v3-turbo")
+STT_MODEL: str = _ENV.get("STT_MODEL", "large-v3-turbo")
 
 # Device / precision. RTX 5060 Ti (Blackwell sm_120) has CUDA; float16 is the
 # fastest safe compute type. Override for CPU practice runs (STT_DEVICE=cpu,
 # STT_COMPUTE_TYPE=int8).
-STT_DEVICE: str = os.environ.get("STT_DEVICE", "cuda")
-STT_COMPUTE_TYPE: str = os.environ.get("STT_COMPUTE_TYPE", "float16")
+STT_DEVICE: str = _ENV.get("STT_DEVICE", "cuda")
+STT_COMPUTE_TYPE: str = _ENV.get("STT_COMPUTE_TYPE", "float16")
 
 # faster-whisper decode knobs. beam_size=5 measured at rtf 0.007 on turbo — the
 # latency headroom is ~100x, so greedy buys nothing worth having; take the accuracy.
-STT_BEAM_SIZE: int = int(os.environ.get("STT_BEAM_SIZE", "5"))
+STT_BEAM_SIZE: int = int(_ENV.get("STT_BEAM_SIZE", "5"))
 
 # Forced `pl` beat auto-detect on the real recording: identical text, faster decode
 # (0.35s vs 0.49s), and no risk of language detection flipping on a short ambient
@@ -44,7 +102,7 @@ STT_BEAM_SIZE: int = int(os.environ.get("STT_BEAM_SIZE", "5"))
 # code-switch seam ("jak i a do tyłu bit of English"). Clean either side of it.
 # This is the FORCED language when detection is off, and the FALLBACK when detection is
 # uncertain. It is deliberately Polish — the interview is mostly Polish (see below).
-STT_LANGUAGE: str = os.environ.get("STT_LANGUAGE", "pl")
+STT_LANGUAGE: str = _ENV.get("STT_LANGUAGE", "pl")
 
 # --- Per-segment language detection (user decision 2026-09-02) ---
 # The interview is mostly Polish with occasional fully-English questions. To answer each
@@ -54,11 +112,11 @@ STT_LANGUAGE: str = os.environ.get("STT_LANGUAGE", "pl")
 # otherwise we fall back to STT_LANGUAGE (pl) and decode in Polish. A Polish sentence with
 # embedded English tech terms detects as pl (its dominant language), which is what we want.
 # Turn this off (STT_DETECT_LANGUAGE=0) to restore the proven forced-pl path.
-STT_DETECT_LANGUAGE: bool = os.environ.get("STT_DETECT_LANGUAGE", "1") not in ("0", "false", "False")
+STT_DETECT_LANGUAGE: bool = _ENV.get("STT_DETECT_LANGUAGE", "1") not in ("0", "false", "False")
 STT_LANGUAGE_CANDIDATES: tuple[str, ...] = tuple(
-    c.strip() for c in os.environ.get("STT_LANGUAGE_CANDIDATES", "pl,en").split(",") if c.strip()
+    c.strip() for c in _ENV.get("STT_LANGUAGE_CANDIDATES", "pl,en").split(",") if c.strip()
 )
-STT_LANGUAGE_MIN_PROB: float = float(os.environ.get("STT_LANGUAGE_MIN_PROB", "0.7"))
+STT_LANGUAGE_MIN_PROB: float = float(_ENV.get("STT_LANGUAGE_MIN_PROB", "0.7"))
 
 # --- Straddling-segment code-switch handling (D26, G8 d / #397, measured 2026-09-05) ---
 # ONE `detect_language` call per segment returns ONE language token, and on the real HR call
@@ -78,22 +136,22 @@ STT_LANGUAGE_MIN_PROB: float = float(os.environ.get("STT_LANGUAGE_MIN_PROB", "0.
 #             lever are untouched.
 # DEFAULT = split (D26, chosen on the measurement below; `rescore` is the rejected alternative). `off` restores the pre-#397 path
 # exactly and costs exactly what it used to.
-STT_CODESWITCH_MODE: str = os.environ.get("STT_CODESWITCH_MODE", "split")
+STT_CODESWITCH_MODE: str = _ENV.get("STT_CODESWITCH_MODE", "split")
 # Sub-window geometry for the switch detector. 6 s / 3 s was chosen BEFORE any result was
 # seen (it is two windows per SEGMENT_MIN_SECONDS) and not tuned afterwards.
 STT_CODESWITCH_WINDOW_SECONDS: float = float(
-    os.environ.get("STT_CODESWITCH_WINDOW_SECONDS", "6.0")
+    _ENV.get("STT_CODESWITCH_WINDOW_SECONDS", "6.0")
 )
-STT_CODESWITCH_HOP_SECONDS: float = float(os.environ.get("STT_CODESWITCH_HOP_SECONDS", "3.0"))
+STT_CODESWITCH_HOP_SECONDS: float = float(_ENV.get("STT_CODESWITCH_HOP_SECONDS", "3.0"))
 # A language must hold this many CONSECUTIVE confident windows to count as a side of a switch.
 # 1 flags any disagreement; 2 ignores a single blip in one window. On the real call this is a
 # COST knob, not a correctness one — at 1 it fires on 6/110 segments, at 2 on 2/110, and the
 # four extra segments resolve to the same language either way.
-STT_CODESWITCH_MIN_WINDOWS: int = int(os.environ.get("STT_CODESWITCH_MIN_WINDOWS", "2"))
+STT_CODESWITCH_MIN_WINDOWS: int = int(_ENV.get("STT_CODESWITCH_MIN_WINDOWS", "2"))
 # Segments shorter than this are never probed: below window+hop there are not two windows to
 # disagree, and the probe would cost an encoder pass to learn nothing.
 STT_CODESWITCH_MIN_SECONDS: float = float(
-    os.environ.get("STT_CODESWITCH_MIN_SECONDS", "10.0")
+    _ENV.get("STT_CODESWITCH_MIN_SECONDS", "10.0")
 )
 # How much of the segment the detector looks at BEFORE it has any reason to suspect a switch.
 #   ends — probe only the first and last window. A switch OF THE UTTERANCE'S LANGUAGE ends the
@@ -107,7 +165,37 @@ STT_CODESWITCH_MIN_SECONDS: float = float(
 # keeps a max-length line inside the ceiling. KNOWN LIMIT: a switch that returns before the
 # segment ends (pl -> en -> pl) leaves both ends agreeing and is not detected — such a segment
 # is then served exactly as it is today, no worse.
-STT_CODESWITCH_SCAN: str = os.environ.get("STT_CODESWITCH_SCAN", "ends")
+STT_CODESWITCH_SCAN: str = _ENV.get("STT_CODESWITCH_SCAN", "ends")
+
+# --- Jargon/hotword bias (#324, G8 "initial_prompt jargon bias", DEFAULT OFF) ---
+# A real technical-round interview found recurring mis-hears of the project's own domain
+# jargon: BM25->"BN25", LLM->"ELM", Pydantic->"pedantik/pedantyk", "machine learning"->
+# "maszynalingiem". faster-whisper 1.2.1 exposes two ways to bias a decode toward a term
+# list: `initial_prompt` and `hotwords`. This project uses **`hotwords`** (see
+# `scripts/stt.py::Transcriber._decode_once` for where it is threaded in), for two reasons
+# read from the installed faster-whisper 1.2.1 source, not guessed:
+#   1. `hotwords` is applied by `get_prompt()` on EVERY decode window regardless of
+#      `previous_tokens`, whereas `initial_prompt` is folded into `all_tokens` once before
+#      the seek loop and only persists into later windows via `previous_tokens`/
+#      `condition_on_previous_text` — i.e. it can be silently pushed out on a long decode.
+#      This project's segments are single-window decodes (<= SEGMENT_MAX_SECONDS = 30 s vs a
+#      30 s chunk_length), so in practice the two are equivalent HERE, but hotwords is the
+#      mechanism that stays correct if that ever changes.
+#   2. `Model.detect_language()` (used by `_decide_language`/`_window_vote`/`_detect_windows`
+#      for language planning) takes NO prompt/hotwords parameter at all — it is a completely
+#      separate method. So whichever knob is used, LANGUAGE DETECTION CANNOT SEE IT; this is
+#      a structural guarantee from the library's API shape, not a behaviour we have to keep
+#      correct by hand.
+# DEFAULT = "" = empty tuple = TODAY'S BEHAVIOUR EXACTLY (no `hotwords=` kwarg is even passed
+# to `model.transcribe()` when this is empty — see `Transcriber._decode_once`). Comma list;
+# CLI (`live_transcribe.py --hotwords`) > this env var > this default (CFG). See
+# `design/MEASUREMENT_stt_hotwords_324.md` for the measurement taken before any default
+# change, and G8 in `design/OPEN_DESIGN.md` for the open risk (a jargon prompt could tilt
+# language detection toward `en` and cause Whisper to TRANSLATE Polish speech — measured to
+# NOT be possible via this knob, see reason 2 above, but the risk motivated the measurement).
+STT_HOTWORDS: tuple[str, ...] = tuple(
+    t.strip() for t in _ENV.get("STT_HOTWORDS", "").split(",") if t.strip()
+)
 
 # --- Suggestion language (user decision 2026-08-31, revised 2026-09-02) ---
 # The on-screen suggestion language is a separate axis from the spoken language. Three modes:
@@ -116,12 +204,12 @@ STT_CODESWITCH_SCAN: str = os.environ.get("STT_CODESWITCH_SCAN", "ends")
 #            English question an English one.
 #   "en" / "pl" — force every suggestion into that language regardless of the question.
 # Must be SWITCHABLE AT SESSION START (user requirement) — the dashboard exposes it too.
-SUGGESTION_LANGUAGE: str = os.environ.get("SUGGESTION_LANGUAGE", "match")  # "match" | "en" | "pl"
+SUGGESTION_LANGUAGE: str = _ENV.get("SUGGESTION_LANGUAGE", "match")  # "match" | "en" | "pl"
 
 # --- Audio capture (D17) ---
 # Whisper expects 16 kHz mono float32; keep capture at that rate to avoid resampling.
-SAMPLE_RATE: int = int(os.environ.get("SAMPLE_RATE", "16000"))
-CHANNELS: int = int(os.environ.get("CHANNELS", "1"))
+SAMPLE_RATE: int = int(_ENV.get("SAMPLE_RATE", "16000"))
+CHANNELS: int = int(_ENV.get("CHANNELS", "1"))
 
 # --- Live segmentation (scripts/live_transcribe.py) ---
 # MEASURED CONSTRAINT (2026-08-31, same audio): window length drives accuracy —
@@ -133,9 +221,9 @@ CHANNELS: int = int(os.environ.get("CHANNELS", "1"))
 #
 # webrtcvad aggressiveness 0-3 (3 = most eager to call audio non-speech). 2 for call
 # audio: 3 clips quiet sentence tails, 0-1 lets keyboard/fan noise hold a segment open.
-VAD_AGGRESSIVENESS: int = int(os.environ.get("VAD_AGGRESSIVENESS", "2"))
+VAD_AGGRESSIVENESS: int = int(_ENV.get("VAD_AGGRESSIVENESS", "2"))
 # webrtcvad accepts ONLY 10/20/30 ms frames at 8/16/32/48 kHz.
-VAD_FRAME_MS: int = int(os.environ.get("VAD_FRAME_MS", "20"))
+VAD_FRAME_MS: int = int(_ENV.get("VAD_FRAME_MS", "20"))
 
 # Adaptive noise floor on top of webrtcvad. MEASURED 2026-08-31: webrtcvad alone
 # calls steady microphone hiss "speech" — on a live two-stream run the webcam mic's
@@ -144,9 +232,9 @@ VAD_FRAME_MS: int = int(os.environ.get("VAD_FRAME_MS", "20"))
 # if it is ALSO meaningfully louder than that channel's own recent noise floor
 # (10th-percentile frame RMS over the trailing window). Per channel, because mic and
 # monitor levels differ by a lot.
-VAD_NOISE_WINDOW_SECONDS: float = float(os.environ.get("VAD_NOISE_WINDOW_SECONDS", "20.0"))
-VAD_SPEECH_RMS_MULT: float = float(os.environ.get("VAD_SPEECH_RMS_MULT", "3.0"))
-VAD_SPEECH_MIN_RMS: float = float(os.environ.get("VAD_SPEECH_MIN_RMS", "0.004"))
+VAD_NOISE_WINDOW_SECONDS: float = float(_ENV.get("VAD_NOISE_WINDOW_SECONDS", "20.0"))
+VAD_SPEECH_RMS_MULT: float = float(_ENV.get("VAD_SPEECH_RMS_MULT", "3.0"))
+VAD_SPEECH_MIN_RMS: float = float(_ENV.get("VAD_SPEECH_MIN_RMS", "0.004"))
 
 # A/B THAT SETTLED THE POLICY (2026-08-31, identical 37.7 s audio pushed through the
 # LIVE loop with --from-wav; reference scripts/outputs/ab_source_en.wav):
@@ -164,10 +252,10 @@ VAD_SPEECH_MIN_RMS: float = float(os.environ.get("VAD_SPEECH_MIN_RMS", "0.004"))
 # cuts bisect phrases and starve short windows) rather than predicting live numbers.
 #
 # A pause this long ends a segment (a natural sentence/turn boundary).
-SEGMENT_SILENCE_SECONDS: float = float(os.environ.get("SEGMENT_SILENCE_SECONDS", "0.9"))
+SEGMENT_SILENCE_SECONDS: float = float(_ENV.get("SEGMENT_SILENCE_SECONDS", "0.9"))
 # ...but only once the segment is this long, so short bursts glue into a usable window
 # instead of each "mhm" becoming its own decode.
-SEGMENT_MIN_SECONDS: float = float(os.environ.get("SEGMENT_MIN_SECONDS", "4.0"))
+SEGMENT_MIN_SECONDS: float = float(_ENV.get("SEGMENT_MIN_SECONDS", "4.0"))
 # Hard cap so an uninterrupted monologue still reaches the screen. Above the 15 s knee
 # in the table, and inside Whisper's own 30 s receptive window.
 # STAYS 30 s (D28, #400): 20 s was measured on the real call — it changes 10.0 %/20 s-window of
@@ -175,26 +263,26 @@ SEGMENT_MIN_SECONDS: float = float(os.environ.get("SEGMENT_MIN_SECONDS", "4.0"))
 # largely already bought back by D25; D26 and the D27 meter both survive it. Lowering this is a
 # per-session CFG choice, not the default. Re-evaluate after technical-round audio (#323) + a
 # human WER pass (#387). See design/MEASUREMENT_segment_cap_400.md.
-SEGMENT_MAX_SECONDS: float = float(os.environ.get("SEGMENT_MAX_SECONDS", "30.0"))
+SEGMENT_MAX_SECONDS: float = float(_ENV.get("SEGMENT_MAX_SECONDS", "30.0"))
 # Close a stalled short segment after this much silence even if it never reached
 # SEGMENT_MIN_SECONDS (otherwise a lone short burst waits forever).
 SEGMENT_MAX_SILENCE_SECONDS: float = float(
-    os.environ.get("SEGMENT_MAX_SILENCE_SECONDS", "2.5")
+    _ENV.get("SEGMENT_MAX_SILENCE_SECONDS", "2.5")
 )
 # Audio kept from *before* VAD fires, so a segment never starts mid-word.
-SEGMENT_PREROLL_SECONDS: float = float(os.environ.get("SEGMENT_PREROLL_SECONDS", "0.4"))
+SEGMENT_PREROLL_SECONDS: float = float(_ENV.get("SEGMENT_PREROLL_SECONDS", "0.4"))
 # Only a SEGMENT_MAX_SECONDS force-cut lands mid-speech; carry this much audio into the
 # next segment so a bisected phrase survives whole in one of them. The duplicated words
 # are then removed from the TEXT by the overlap de-duplicator.
 SEGMENT_CARRYOVER_SECONDS: float = float(
-    os.environ.get("SEGMENT_CARRYOVER_SECONDS", "1.5")
+    _ENV.get("SEGMENT_CARRYOVER_SECONDS", "1.5")
 )
 # Segments quieter than this are dropped WITHOUT a decode: Whisper hallucinates fluent
 # filler ("Dziekuje za uwage", "Napisy stworzone przez...") on near-silence.
-SEGMENT_MIN_PEAK: float = float(os.environ.get("SEGMENT_MIN_PEAK", "0.005"))
+SEGMENT_MIN_PEAK: float = float(_ENV.get("SEGMENT_MIN_PEAK", "0.005"))
 # Minimum voiced audio for a segment to be worth decoding at all.
 SEGMENT_MIN_SPEECH_SECONDS: float = float(
-    os.environ.get("SEGMENT_MIN_SPEECH_SECONDS", "0.5")
+    _ENV.get("SEGMENT_MIN_SPEECH_SECONDS", "0.5")
 )
 
 # --- D25 provisional lines (#399) — written by the RECORDER, decoded on its own model ---
@@ -208,7 +296,7 @@ SEGMENT_MIN_SPEECH_SECONDS: float = float(
 # Default ON: the .partial is a separate file that nothing reads yet, so an enabled default buys
 # the artefact the #323 dry-run needs and cannot change one byte of the transcript, the scorer
 # file or the WAV. Turn it off with PARTIAL_DECODE_ENABLED=0 or `--no-partials`.
-PARTIAL_DECODE_ENABLED: bool = os.environ.get("PARTIAL_DECODE_ENABLED", "1") not in (
+PARTIAL_DECODE_ENABLED: bool = _ENV.get("PARTIAL_DECODE_ENABLED", "1") not in (
     "0", "false", "False"
 )
 # Cadence: re-decode the open segment this often. MEASURED on the real 42-min HR call (2026-09-04):
@@ -217,13 +305,13 @@ PARTIAL_DECODE_ENABLED: bool = os.environ.get("PARTIAL_DECODE_ENABLED", "1") not
 # 0.96 @15-20 s) over 86 prefixes of that call — which is CHURN, not accuracy (D24): no human
 # reference exists for that audio. Shortening this buys freshness and loses survival; lengthening it
 # does the reverse. It is NOT a latency knob for the .txt — SEGMENT_MAX_SECONDS owns that (#400).
-PARTIAL_DECODE_SECONDS: float = float(os.environ.get("PARTIAL_DECODE_SECONDS", "5.0"))
+PARTIAL_DECODE_SECONDS: float = float(_ENV.get("PARTIAL_DECODE_SECONDS", "5.0"))
 # The CONSUMER half of D25 (#399): does the dashboard render the provisional line at all?
 # Separate from PARTIAL_DECODE_ENABLED, which is the recorder's knob — the recorder can keep
 # writing the artefact for the #323 dry-run and D11 scoring while a screen chooses not to show
 # provisional text. Default ON: an empty slot is the state a run without a .partial already has,
 # and the whole point of D25 is the MEASURED 28 s the screen is otherwise blank (OPEN_DESIGN P5).
-DASHBOARD_SHOW_PARTIALS: bool = os.environ.get("DASHBOARD_SHOW_PARTIALS", "1") not in (
+DASHBOARD_SHOW_PARTIALS: bool = _ENV.get("DASHBOARD_SHOW_PARTIALS", "1") not in (
     "0", "false", "False"
 )
 
@@ -232,7 +320,7 @@ DASHBOARD_SHOW_PARTIALS: bool = os.environ.get("DASHBOARD_SHOW_PARTIALS", "1") n
 # backend for quality, but SI1 forbids a silent egress of transcript + bundle, so the
 # shipped default is LOCAL and cloud is an explicit opt-in (REASONING_BACKEND=cloud +
 # three CLOUD_* env vars, announced by llm_client.announce_backend on every build).
-REASONING_BACKEND: str = os.environ.get("REASONING_BACKEND", "local")  # "local" | "cloud"
+REASONING_BACKEND: str = _ENV.get("REASONING_BACKEND", "local")  # "local" | "cloud"
 
 # Local (Ollama) model. RE-DECIDED 2026-09-02 after two client-side fixes made a bigger
 # model affordable. All figures: a representative ~9.2k-prompt-token bundle, 3 reps, one model
@@ -270,37 +358,37 @@ REASONING_BACKEND: str = os.environ.get("REASONING_BACKEND", "local")  # "local"
 # qwen3:14b is a 40K-context model, so 16384 is a VRAM choice, not a ceiling.
 # gpt-oss:20b was rejected on arithmetic: 14 GB + 2.2 GB Whisper does not fit in 15.9 GB.
 # Earlier note about llama3.2:3b still stands: fast, but answers with meta-instructions.
-LOCAL_MODEL: str = os.environ.get("OLLAMA_MODEL", "interview-copilot:14b")
+LOCAL_MODEL: str = _ENV.get("OLLAMA_MODEL", "interview-copilot:14b")
 # VRAM measured with both models resident: 7.8 GB of 15.9 GB. 8b alone is 5.3 GB, leaving
 # room for large-v3-turbo. Still run `ollama ps` before a call (ENVIRONMENT.md).
 
 # Qwen3 thinks by default and Ollama hides the reasoning tokens from `content` while still
 # charging you the wall-clock for them. See llm_client.get_llm for the measurement.
-LOCAL_DISABLE_THINKING: bool = os.environ.get("LOCAL_DISABLE_THINKING", "1") not in ("0", "false", "False")
+LOCAL_DISABLE_THINKING: bool = _ENV.get("LOCAL_DISABLE_THINKING", "1") not in ("0", "false", "False")
 
 # Stream from Ollama over plain HTTP instead of through langchain. MEASURED 2026-09-02 on the
 # identical prompt and model: 66.2 tok/s raw vs 21.3 tok/s through langchain_openai.stream() —
 # a 3.1x penalty in the CLIENT, not the model, and the single biggest latency lever found.
 # Local only; the cloud path stays on langchain. Set to 0 to fall back if this ever misbehaves.
-LOCAL_FAST_STREAM: bool = os.environ.get("LOCAL_FAST_STREAM", "1") not in ("0", "false", "False")
+LOCAL_FAST_STREAM: bool = _ENV.get("LOCAL_FAST_STREAM", "1") not in ("0", "false", "False")
 
 # Cloud model: NO DEFAULT ON PURPOSE. BYOK means the user brings base_url + model + key;
 # a baked-in default is one env var away from a silent egress (SI1).
-CLOUD_MODEL: str = os.environ.get("CLOUD_MODEL", "")
+CLOUD_MODEL: str = _ENV.get("CLOUD_MODEL", "")
 
 # Prompt caching on the cloud backend. The system block (the whole context bundle) is
 # identical on every call, so caching it turns ~14k full-price input tokens into ~14k
 # cache-read tokens billed at ~0.1x. Write costs ~1.25x once. Local is unaffected — Ollama
 # manages its own KV cache and reports no cache usage.
-CLOUD_PROMPT_CACHE: bool = os.environ.get("CLOUD_PROMPT_CACHE", "1") not in ("0", "false", "False")
+CLOUD_PROMPT_CACHE: bool = _ENV.get("CLOUD_PROMPT_CACHE", "1") not in ("0", "false", "False")
 
 # Deterministic answers: this is a factual scaffold from a fixed bundle, not creative writing.
-REASONING_TEMPERATURE: float = float(os.environ.get("REASONING_TEMPERATURE", "0.0"))
+REASONING_TEMPERATURE: float = float(_ENV.get("REASONING_TEMPERATURE", "0.0"))
 # Hard ceiling per call. A suggestion the user cannot skim mid-answer is worse than none,
 # and the cap is also the main latency lever on a local model (tokens dominate wall-clock).
-SUGGESTION_MAX_TOKENS: int = int(os.environ.get("SUGGESTION_MAX_TOKENS", "220"))
+SUGGESTION_MAX_TOKENS: int = int(_ENV.get("SUGGESTION_MAX_TOKENS", "220"))
 # Abandon a call that outlives its usefulness rather than printing it late.
-REASONING_TIMEOUT_SECONDS: float = float(os.environ.get("REASONING_TIMEOUT_SECONDS", "25.0"))
+REASONING_TIMEOUT_SECONDS: float = float(_ENV.get("REASONING_TIMEOUT_SECONDS", "25.0"))
 
 # --- Ambient trigger policy (G6 — when the loop fires the LLM) ---
 # Determinism First (CLAUDE.md): a rule-based question detector, NOT an LLM classifier per
@@ -318,39 +406,85 @@ REASONING_TIMEOUT_SECONDS: float = float(os.environ.get("REASONING_TIMEOUT_SECON
 # rate is unknown until it runs on a live call transcript (#324).
 # An LLM classifier per segment would cost a whole second model call to beat this — the
 # expensive option, not the default.
-FIRE_ON_QUESTIONS_ONLY: bool = os.environ.get("FIRE_ON_QUESTIONS_ONLY", "1") not in ("0", "false", "False")
+FIRE_ON_QUESTIONS_ONLY: bool = _ENV.get("FIRE_ON_QUESTIONS_ONLY", "1") not in ("0", "false", "False")
 # Segments shorter than this are turn-taking noise ("mhm", "tak, jasne"), not a question
 # worth a model call, even when they end in a question mark.
-SUGGESTION_MIN_WORDS: int = int(os.environ.get("SUGGESTION_MIN_WORDS", "4"))
+SUGGESTION_MIN_WORDS: int = int(_ENV.get("SUGGESTION_MIN_WORDS", "4"))
 # Never fire twice inside this window: a long question often arrives as two segments and
 # the second suggestion would land on top of the first, unread.
-SUGGESTION_COOLDOWN_SECONDS: float = float(os.environ.get("SUGGESTION_COOLDOWN_SECONDS", "8.0"))
+SUGGESTION_COOLDOWN_SECONDS: float = float(_ENV.get("SUGGESTION_COOLDOWN_SECONDS", "8.0"))
 # How many previous transcript lines are shown to the model as conversation context. Each is
 # labelled by speaker ("Interviewer:" / "You:", G9/#326) so the model knows whose turn it was.
-SUGGESTION_HISTORY_LINES: int = int(os.environ.get("SUGGESTION_HISTORY_LINES", "4"))
+SUGGESTION_HISTORY_LINES: int = int(_ENV.get("SUGGESTION_HISTORY_LINES", "4"))
 # How many past suggestions the dashboard keeps for live scrollback ("return to a previous
 # suggestion during the interview") and, on complete ones, appends to live_suggestions_<stamp>.jsonl.
 # Bounds memory on a long call; 0 disables the history panel entirely.
-SUGGESTION_HISTORY_MAX: int = int(os.environ.get("SUGGESTION_HISTORY_MAX", "50"))
+SUGGESTION_HISTORY_MAX: int = int(_ENV.get("SUGGESTION_HISTORY_MAX", "50"))
 # Whose turns the copilot answers (G9/P4, #326). The monitor channel carries ONLY the
 # interviewer ("them") and the mic ONLY the candidate ("you") — on headphones there is no
 # acoustic bleed, so live_transcribe tags each line by its dominant channel. "them" (the
 # default) means the copilot never fires on the candidate's own questions; "any" restores
 # the old channel-blind behaviour. An UNTAGGED line (old transcript, or a monitor-only
 # run with no mic) is always treated as "them" so nothing is silently dropped.
-ANSWER_SPEAKER: str = os.environ.get("ANSWER_SPEAKER", "them")  # "them" | "you" | "any"
+ANSWER_SPEAKER: str = _ENV.get("ANSWER_SPEAKER", "them")  # "them" | "you" | "any"
+
+# --- Context bundle generation (D30 — scripts/generate_context.py) ---
+# The offline practice track's bundle builder turns a raw JD into the INTERVIEW-SIDE sections
+# (job_description / company_brief / plan / question_bank) and leaves the candidate's own content
+# (resume / answer_bank / honesty_boundary) as placeholders (D22 — never synthesize the
+# candidate's experience). These knobs are the generator's tunables (CFG); secrets stay in .env.
+# How many mock-interview questions to author per competency (plan step).
+GENERATE_QUESTIONS_PER_COMPETENCY: int = int(_ENV.get("GENERATE_QUESTIONS_PER_COMPETENCY", "3"))
+# Backend the generator calls. Defaults to LOCAL (SI1): building a bundle from a JD is offline
+# prep and stays on this machine unless the user explicitly opts into the cloud egress.
+GENERATE_BACKEND: str = _ENV.get("GENERATE_BACKEND", "local")  # "local" | "cloud"
+# Empty = the backend's own default model (LOCAL_MODEL / CLOUD_MODEL via llm_client.model_for).
+GENERATE_MODEL: str = _ENV.get("GENERATE_MODEL", "")
+# Generation ceiling — larger than a live suggestion because one call emits the whole question
+# bank as a single JSON object; the local model still needs num_ctx headroom for it.
+# 6144 since #1272 (2026-09-26): the 5-step plan with done_signals + a 9-question bank measured ~5k
+# tokens on the 14b — the old 4096 cap (enforced since #991) truncated the JSON mid-object.
+GENERATE_MAX_TOKENS: int = int(_ENV.get("GENERATE_MAX_TOKENS", "6144"))
+# Per-call timeout for generation. MUST be far larger than REASONING_TIMEOUT_SECONDS (25 s, sized
+# for a ~220-token live suggestion): a whole-bank JSON generation on the local 14b measured 30 s
+# for ~1.5k output tokens and would time out at the live default (measured 2026-09-17, #651 E2E).
+GENERATE_TIMEOUT_SECONDS: float = float(_ENV.get("GENERATE_TIMEOUT_SECONDS", "480"))
+
+# --- Mock-interview scoring (D30 — scripts/training.py) ---
+# The offline practice track's ENGINE grades a spoken answer against its question's rubric with
+# exactly ONE model call; the arithmetic (level -> score x weight, total, normalization) is
+# deterministic Python (CLAUDE.md Determinism First), never the model's. These are its tunables.
+# Backend the grader calls. Defaults to LOCAL (SI1): practice answers stay on this machine unless
+# the user explicitly opts into the cloud egress, exactly like GENERATE_BACKEND.
+SCORING_BACKEND: str = _ENV.get("SCORING_BACKEND", "local")  # "local" | "cloud"
+# Empty = the backend's own default model (LOCAL_MODEL / CLOUD_MODEL via llm_client.model_for).
+SCORING_MODEL: str = _ENV.get("SCORING_MODEL", "")
+# Ceiling per grading call. One call returns per-criterion levels + short notes plus a concepts
+# and strengths list as a single JSON object, so it needs more room than a live suggestion but
+# far less than the whole-bank generation call.
+SCORING_MAX_TOKENS: int = int(_ENV.get("SCORING_MAX_TOKENS", "700"))
+# Per-call timeout for grading — larger than the live 25 s default (a grading call emits several
+# hundred JSON tokens on the local model), smaller than generation. See GENERATE_TIMEOUT_SECONDS.
+SCORING_TIMEOUT_SECONDS: float = float(_ENV.get("SCORING_TIMEOUT_SECONDS", "180"))
+# How many questions generate_questions() authors when a bundle carries no pre-built
+# question_bank (the generate_context.py path leaves one; this is the fallback count).
+TRAINING_QUESTION_COUNT: int = int(_ENV.get("TRAINING_QUESTION_COUNT", "6"))
+# Post-interview review (D32/D33): write a per-question rubric before grading (one extra model
+# call per question) instead of the holistic `overall` criterion. The review.py CLI flag
+# `--synthesize-rubrics` still forces it on; this is the hub's Review-view default (D36).
+REVIEW_SYNTHESIZE_RUBRICS: bool = _ENV.get("REVIEW_SYNTHESIZE_RUBRICS", "0") not in ("0", "false", "False")
 
 # --- Context bundle (D13) ---
 # Per-session bundle root: scripts/inputs/sessions/<session_id>/bundle.json
-SESSIONS_DIRNAME: str = os.environ.get("SESSIONS_DIRNAME", "sessions")
+SESSIONS_DIRNAME: str = _ENV.get("SESSIONS_DIRNAME", "sessions")
 # How often the reasoning layer re-reads the growing transcript file (D19 seam). The
 # transcript is fsync'd per line, so this is pure added latency: 0.25 s against a 5-30 s
 # segment cadence is 1-5% of the budget, which is what made file-tailing affordable.
-TRANSCRIPT_POLL_SECONDS: float = float(os.environ.get("TRANSCRIPT_POLL_SECONDS", "0.25"))
+TRANSCRIPT_POLL_SECONDS: float = float(_ENV.get("TRANSCRIPT_POLL_SECONDS", "0.25"))
 
 # --- Dashboard (D18 — bind 127.0.0.1 only, SI1/SI2) ---
-DASHBOARD_HOST: str = os.environ.get("DASHBOARD_HOST", "127.0.0.1")
-DASHBOARD_PORT: int = int(os.environ.get("DASHBOARD_PORT", "8765"))
+DASHBOARD_HOST: str = _ENV.get("DASHBOARD_HOST", "127.0.0.1")
+DASHBOARD_PORT: int = int(_ENV.get("DASHBOARD_PORT", "8765"))
 
 # --- Single-app mode (#607): the dashboard spawns/kills the recorder itself ---
 # `--app` turns the dashboard into the one app the desktop shortcut launches: it manages
@@ -359,32 +493,32 @@ DASHBOARD_PORT: int = int(os.environ.get("DASHBOARD_PORT", "8765"))
 # display). These name the capture devices the child is spawned with. "auto" matches
 # live_transcribe's own defaults, but NOTE the gotcha: `--mic auto` resolves the lab's WEBCAM
 # mic, not your external mic — set COPILOT_MIC to your external mic source for a real call.
-COPILOT_SOURCE: str = os.environ.get("COPILOT_SOURCE", "auto")   # monitor of the sink Teams plays to
-COPILOT_MIC: str = os.environ.get("COPILOT_MIC", "auto")         # your microphone (set explicitly!)
+COPILOT_SOURCE: str = _ENV.get("COPILOT_SOURCE", "auto")   # monitor of the sink Teams plays to
+COPILOT_MIC: str = _ENV.get("COPILOT_MIC", "auto")         # your microphone (set explicitly!)
 # Open the browser at the dashboard URL on launch (the shortcut wants this; a headless run does not).
-COPILOT_OPEN_BROWSER: bool = os.environ.get("COPILOT_OPEN_BROWSER", "1") not in ("0", "false", "False")
+COPILOT_OPEN_BROWSER: bool = _ENV.get("COPILOT_OPEN_BROWSER", "1") not in ("0", "false", "False")
 # Seconds the app waits for the freshly-spawned recorder to write its first transcript file
 # before giving up and reporting the recorder failed to start.
-COPILOT_RECORDER_WAIT_SECONDS: float = float(os.environ.get("COPILOT_RECORDER_WAIT_SECONDS", "30.0"))
+COPILOT_RECORDER_WAIT_SECONDS: float = float(_ENV.get("COPILOT_RECORDER_WAIT_SECONDS", "30.0"))
 # How many transcript lines the server keeps for a late-joining browser. The real 42-min HR
 # call produced 110 lines, so 400 holds a long technical round whole; beyond it the oldest
 # are dropped and the UI says so rather than silently showing a truncated call.
-DASHBOARD_MAX_LINES: int = int(os.environ.get("DASHBOARD_MAX_LINES", "400"))
+DASHBOARD_MAX_LINES: int = int(_ENV.get("DASHBOARD_MAX_LINES", "400"))
 
 # --- P5 bounded-wait meter (OPEN_DESIGN P5, option A — the interim affordance before D25) ---
 # The dashboard is blank for a median 28 s mid-answer. The meter renders "last line N s ago ·
 # next due within <=M s" from the D19 tail plus a clock: no second Whisper, no second model,
 # no new dependency, and NO SPEECH OF ITS OWN — it cannot be wrong about the interview.
-METER_ENABLED: bool = os.environ.get("METER_ENABLED", "1") not in ("0", "false", "False")
+METER_ENABLED: bool = _ENV.get("METER_ENABLED", "1") not in ("0", "false", "False")
 # How often the server recomputes and pushes the meter. The math lives in Python
 # (`dashboard.meter_state`, a pure tested function), NOT in the browser, so the one number the
 # user reads under pressure has exactly one implementation. 0.25 s over a loopback websocket is
 # ~4 messages/s and matches TRANSCRIPT_POLL_SECONDS.
-METER_TICK_SECONDS: float = float(os.environ.get("METER_TICK_SECONDS", "0.25"))
+METER_TICK_SECONDS: float = float(_ENV.get("METER_TICK_SECONDS", "0.25"))
 # The ceiling the meter promises against. 0 = derive it as SEGMENT_MAX_SECONDS +
 # METER_DECODE_ALLOWANCE_SECONDS. Set it explicitly only to keep a TIME-COMPRESSED replay
 # truthful (`replay_transcript.py --speed N` wants ceiling/N).
-METER_CEILING_SECONDS: float = float(os.environ.get("METER_CEILING_SECONDS", "0"))
+METER_CEILING_SECONDS: float = float(_ENV.get("METER_CEILING_SECONDS", "0"))
 # MEASURED 2026-09-04 on the real 42-min call, and the reason this knob exists at all: a line
 # cannot reach the screen until its segment closes AND is decoded. Scoring the 109 arrival gaps
 # against a bare SEGMENT_MAX_SECONDS=30 ceiling holds only 84/109 — because 54% of segments end
@@ -414,18 +548,18 @@ METER_CEILING_SECONDS: float = float(os.environ.get("METER_CEILING_SECONDS", "0"
 # The residual at 1.0 s is 1 false overdue per ~112 back-to-back gaps, overdue by 0.193 s = 0.8 of one
 # 0.25 s tick, and that one is a Whisper temperature-fallback outlier, not D26.
 # Re-measure with: live_transcribe.py --latency-trace FILE  ->  scripts/meter_budget.py
-METER_DECODE_ALLOWANCE_SECONDS: float = float(os.environ.get("METER_DECODE_ALLOWANCE_SECONDS", "1.0"))
+METER_DECODE_ALLOWANCE_SECONDS: float = float(_ENV.get("METER_DECODE_ALLOWANCE_SECONDS", "1.0"))
 
 # --- Dashboard honesty knobs (see the module docstring in scripts/dashboard.py) ---
 # A finished suggestion answers the question it was fired on. Once this many NEW transcript
 # lines have landed under it, the conversation has moved on and the panel says so instead of
 # leaving a confident stale answer standing (worse than a blank panel).
-SUGGESTION_STALE_LINES: int = int(os.environ.get("SUGGESTION_STALE_LINES", "2"))
+SUGGESTION_STALE_LINES: int = int(_ENV.get("SUGGESTION_STALE_LINES", "2"))
 # Read-only plan panel (P3/G7 is NOT settled — no auto-"covered" state machine is invented here).
 # When on, a plan step is badged `mentioned` on a deterministic literal match of one of its
 # `done_signals` against a transcript line. The badge means exactly that and the UI says so;
 # it is never rendered as "covered".
-PLAN_MENTION_TRACKING: bool = os.environ.get("PLAN_MENTION_TRACKING", "1") not in ("0", "false", "False")
+PLAN_MENTION_TRACKING: bool = _ENV.get("PLAN_MENTION_TRACKING", "1") not in ("0", "false", "False")
 
 # --- Salience gate (D23 — #386; runs AFTER the D20 question trigger, never instead of it) ---
 # MEASURED against an in-sample fixture set (the 24 turns the D20
@@ -445,23 +579,23 @@ PLAN_MENTION_TRACKING: bool = os.environ.get("PLAN_MENTION_TRACKING", "1") not i
 # WHY THE BIG MODEL JUDGES ITSELF: it is already resident for the suggestion, so the gate
 # costs 0 MiB. Measured, a 3B judge beside the 14B leaves 2273 MiB for a Whisper that needs
 # ~2200 — not a margin to take into a live interview.
-SALIENCE_GATE_ENABLED: bool = os.environ.get("SALIENCE_GATE_ENABLED", "1") not in ("0", "false", "False")
+SALIENCE_GATE_ENABLED: bool = _ENV.get("SALIENCE_GATE_ENABLED", "1") not in ("0", "false", "False")
 # "llm" (one-word YES/NO, shipped) | "embed" (cosine vs bundle topics, measured + rejected) | "off"
-SALIENCE_BACKEND: str = os.environ.get("SALIENCE_BACKEND", "llm")
+SALIENCE_BACKEND: str = _ENV.get("SALIENCE_BACKEND", "llm")
 # Empty means "whatever the local suggestion backend is already using" — that is the whole
 # point of the default: no second model, no second VRAM claim, no second download.
-SALIENCE_MODEL: str = os.environ.get("SALIENCE_MODEL", "")
+SALIENCE_MODEL: str = _ENV.get("SALIENCE_MODEL", "")
 # Embed backend only, and it is a MONUMENT, not a tuning knob. 0.436 is the best-F1 cut found by
 # sweeping the whole fixture distribution, and "best" there means firing 21 of 24 — no gate at all.
 # The number that settles it: salient turns average 0.510, non-salient 0.518. The cosine signal is
 # not weak, it is ABSENT and very slightly inverted, so no threshold exists to be chosen.
-SALIENCE_THRESHOLD: float = float(os.environ.get("SALIENCE_THRESHOLD", "0.436"))
+SALIENCE_THRESHOLD: float = float(_ENV.get("SALIENCE_THRESHOLD", "0.436"))
 # bge-m3 is multilingual (Polish 5/7 top-1 on clean probes); nomic-embed-text, the model the
 # subtask row named, scored 1/7 on the same probes and 4/4 on their English translations.
-SALIENCE_EMBED_MODEL: str = os.environ.get("SALIENCE_EMBED_MODEL", "bge-m3")
+SALIENCE_EMBED_MODEL: str = _ENV.get("SALIENCE_EMBED_MODEL", "bge-m3")
 # The gate must be cheap relative to the ~5.9 s suggestion it protects. Measured median 157 ms
 # / p90 194 ms, so 3 s is a hang-detector, not a working budget.
-SALIENCE_TIMEOUT_SECONDS: float = float(os.environ.get("SALIENCE_TIMEOUT_SECONDS", "3.0"))
+SALIENCE_TIMEOUT_SECONDS: float = float(_ENV.get("SALIENCE_TIMEOUT_SECONDS", "3.0"))
 # A wasted call costs tokens; a suggestion the candidate needed and did not get costs the
 # interview. So a broken gate fires everything (today's behaviour) rather than going silent.
-SALIENCE_FAIL_OPEN: bool = os.environ.get("SALIENCE_FAIL_OPEN", "1") not in ("0", "false", "False")
+SALIENCE_FAIL_OPEN: bool = _ENV.get("SALIENCE_FAIL_OPEN", "1") not in ("0", "false", "False")

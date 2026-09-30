@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#12151b">
+<title>Train — Interview copilot</title>
+<link rel="stylesheet" href="/static/app.css">
+<!-- D35 Train view — the D30/D31 mock interview: one question at a time, answer aloud, scorecard.
+     The rubric stays hidden until the scorecard, so nothing coaches the answer. SI2: disclosure permanent. -->
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="/">← Menu</a>
+  <h1>Train</h1>
+  <span class="sep">·</span>
+  <span class="disclosure-tag">Disclosed AI assistance (D11)</span>
+  <span class="sep">·</span>
+  <span class="meta">Local only — <code translate="no">127.0.0.1</code></span>
+  <span class="spacer"></span>
+  <button type="button" class="btn small ghost gear" id="gear">⚙ Training settings</button>
+</header>
+<div class="stale-curtain" id="curtain" role="status" hidden><strong>Not live.</strong> <span id="stale-why"></span></div>
+
+<!-- ============ setup ============ -->
+<div class="page" id="setup" hidden>
+  <main class="narrow setup">
+    <div>
+      <p class="page-title">Train for a call</p>
+      <p class="page-lede">A mock interview. Questions come one at a time, you answer out loud, and at the end every answer is graded against a rubric, your CV and the job description.</p>
+    </div>
+    <div class="banner" id="busy-banner" hidden role="alert">
+      <span class="grow" id="busy-text"></span>
+      <a class="btn small" href="/call">Go to it</a>
+      <button type="button" class="btn small danger" id="busy-stop">End it</button>
+    </div>
+    <section class="card" aria-labelledby="c1">
+      <h3 id="c1"><span class="step-no">1</span> Which interview are you practising for?</h3>
+      <label class="field" style="margin-top:8px">Context bundle
+        <select id="bundle"></select>
+      </label>
+      <div class="bundle-sum" id="bundle-sum"></div>
+      <p class="knob-help default-note" style="margin:10px 0 0"></p>
+    </section>
+    <section class="card" aria-labelledby="c2">
+      <h3 id="c2"><span class="step-no">2</span> How it works</h3>
+      <ul class="checklist" id="checklist"></ul>
+    </section>
+    <div class="actions">
+      <button type="button" class="btn primary big" id="start">Start practice</button>
+      <span class="msg" id="setup-msg" role="status"></span>
+    </div>
+  </main>
+</div>
+
+<!-- ============ running / scoring / scorecard ============ -->
+<div class="train-main" id="run" hidden>
+  <div class="q-stage" id="stage-q">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+      <div>
+        <div class="count" id="progress-text"></div>
+        <div class="progress-dots" id="dots" aria-hidden="true" style="margin-top:6px"></div>
+      </div>
+      <span class="badge accent" id="bundle-badge"></span>
+    </div>
+    <div class="q-card" aria-live="polite">
+      <div class="q-competency" id="q-competency"></div>
+      <div class="q-text" id="q-text"></div>
+    </div>
+    <div class="answer-card">
+      <h3 class="answer-label">Your answer <span class="badge live">● listening</span></h3>
+      <div class="answer-text" id="answer" role="status" aria-label="Your spoken answer, transcribed live"></div>
+    </div>
+    <div class="actions">
+      <button type="button" class="btn primary" id="next">Next question →</button>
+      <button type="button" class="btn" id="finish">Finish &amp; score now</button>
+      <span class="grow" style="flex:1"></span>
+      <button type="button" class="btn small danger" id="abandon">Abandon</button>
+      <span class="msg" id="run-msg" role="status" style="flex-basis:100%"></span>
+    </div>
+  </div>
+
+  <div class="center-state" id="stage-wait" hidden role="status">
+    <div class="spinner" aria-hidden="true"></div>
+    <div id="wait-text">Scoring your answers…</div>
+    <div class="faint" style="font-size:13px;margin-top:6px">One model call per answer. It can take a minute.</div>
+  </div>
+
+  <div class="q-stage" id="stage-score" hidden>
+    <div style="display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap">
+      <h2>Scorecard</h2>
+      <div class="actions">
+        <button type="button" class="btn primary" id="again">Practise again</button>
+        <a class="btn" href="/">Menu</a>
+      </div>
+    </div>
+    <div id="scorecard"></div>
+  </div>
+</div>
+
+<script src="/static/common.js"></script>
+<script>
+"use strict";
+document.querySelectorAll(".default-note").forEach((n) => { n.textContent = DEFAULT_NOTE; });
+let socket = null, running = false, session = null, lastTick = 0;
+let STATUS = {};
+initSettingsDrawer(el("gear"), "train", "Training settings");
+
+function stage(name) {   // "setup" | "q" | "wait" | "score"
+  running = name !== "setup";
+  el("setup").hidden = name !== "setup";
+  el("run").hidden = name === "setup";
+  el("stage-q").hidden = name !== "q";
+  el("stage-wait").hidden = name !== "wait";
+  el("stage-score").hidden = name !== "score";
+  if (name === "setup") el("curtain").hidden = true;
+}
+
+async function paintSetup() {
+  const [st, cfg] = await Promise.all([api("/api/status"), api("/api/config?group=train")]);
+  STATUS = st.data || {};
+  const a = STATUS.active;
+  el("busy-banner").hidden = !(a && a.mode !== "train");
+  if (a && a.mode !== "train") el("busy-text").textContent = "A call is open on “" + a.session + "”" + (a.capturing ? " and is capturing." : ".") + " Only one can run at a time.";
+  let pref = params().get("session");
+  if (!pref) { try { pref = localStorage.getItem("copilot.trainBundle"); } catch (e) { /* ignore */ } }
+  await loadSessions(el("bundle"), pref);
+  const knobs = Object.fromEntries(((cfg.data && cfg.data.knobs) || []).map((k) => [k.env, k.value]));
+  window.TRAIN_KNOBS = knobs;
+  paintBundle();
+}
+function paintBundle() {
+  const id = el("bundle").value, k = window.TRAIN_KNOBS || {};
+  renderBundleSummary(el("bundle-sum"), id);
+  const s = sessionById(id) || {};
+  const list = el("checklist");
+  list.textContent = "";
+  const row = (icon, text, cls) => list.appendChild(h("li", {}, h("span", { class: "ic " + (cls || "dim"), "aria-hidden": "true", text: icon }), h("span", { text })));
+  row("•", s.questions ? "Uses the bundle's " + s.questions + " prepared practice questions."
+                       : "No question bank in this bundle, so " + (k.TRAINING_QUESTION_COUNT || "6") + " questions are written from its plan first (takes a moment).");
+  row(STATUS.mic && STATUS.mic !== "auto" ? "✓" : "⚠", "Answers are captured from your microphone: " + (STATUS.mic || "?") + (STATUS.mic === "auto" ? " (auto picks the webcam; set it in Settings)" : ""),
+      STATUS.mic && STATUS.mic !== "auto" ? "ok-text" : "warn-text");
+  row("•", "Scoring runs " + (k.SCORING_BACKEND === "cloud" ? "on the cloud API (your answers + CV leave this machine)" : "on the local model — nothing leaves this machine") + ".",
+      k.SCORING_BACKEND === "cloud" ? "bad-text" : "dim");
+  row("•", "Press Next when you've finished an answer. You can finish early at any point.");
+}
+el("bundle").addEventListener("change", paintBundle);
+el("busy-stop").addEventListener("click", async () => {
+  if (!confirm("End the call? Its capture stops.")) return;
+  await api("/api/mode/stop", { method: "POST" });
+  paintSetup();
+});
+
+async function control(value) {
+  const r = await api("/api/control", { method: "POST", body: { mode: "train", switch: "training", value } });
+  if (!r.ok) setMsg(el(value === "start" ? "setup-msg" : "run-msg"), r.data.error || ("could not " + value), "error");
+  return r;
+}
+
+el("start").addEventListener("click", async () => {
+  const id = el("bundle").value;           // "" = the default bundle (D37)
+  el("start").disabled = true;
+  setMsg(el("setup-msg"), "preparing questions and starting the microphone…");
+  const m = await api("/api/mode", { method: "POST", body: { mode: "train", session: id } });
+  if (!m.ok) { el("start").disabled = false; setMsg(el("setup-msg"), m.data.error || "could not start", "error"); return; }
+  try { localStorage.setItem("copilot.trainBundle", id); } catch (e) { /* ignore */ }
+  connect();
+  const r = await control("start");
+  el("start").disabled = false;
+  if (r.ok) setMsg(el("setup-msg"), "");
+  else await api("/api/mode/stop", { method: "POST" });
+});
+el("next").addEventListener("click", () => { setMsg(el("run-msg"), ""); control("next"); });
+el("finish").addEventListener("click", () => { stage("wait"); control("finish").then((r) => { if (!r.ok) stage("q"); }); });
+el("abandon").addEventListener("click", async () => {
+  if (!confirm("Abandon this practice run? Nothing is scored.")) return;
+  await api("/api/mode/stop", { method: "POST" });
+  closeSocket(); stage("setup"); paintSetup();
+});
+el("again").addEventListener("click", async () => {
+  await api("/api/mode/stop", { method: "POST" });
+  closeSocket(); stage("setup"); paintSetup();
+});
+
+function renderQuestion(t) {
+  if (!t) return;
+  el("progress-text").textContent = "Question " + (t.index + 1) + " of " + t.total;
+  const dots = el("dots");
+  dots.textContent = "";
+  for (let i = 0; i < t.total; i++) dots.appendChild(h("span", { class: i < t.index ? "done" : i === t.index ? "now" : "" }));
+  el("q-competency").textContent = t.competency || "";
+  el("q-competency").hidden = !t.competency;
+  el("q-text").textContent = t.question || "";
+  el("answer").textContent = t.answer || "";
+  el("next").textContent = t.index + 1 >= t.total ? "Finish & score →" : "Next question →";
+  stage("q");
+}
+
+function closeSocket() { if (socket) { socket.onclose = null; socket.close(); socket = null; } }
+function connect() {
+  closeSocket();
+  socket = new WebSocket("ws://" + location.host + "/ws");
+  socket.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
+    if (msg.kind === "idle") return;
+    if (msg.kind === "hello") {
+      if (msg.mode !== "train") { closeSocket(); return; }
+      session = msg.session;
+      el("bundle-badge").textContent = msg.session;
+      lastTick = Date.now();
+      const t = msg.training;
+      if (t && t.finished) { renderScorecard(el("scorecard"), t.scorecard); stage("score"); }
+      else if (t && t.active) renderQuestion(t);
+    } else if (msg.kind === "tick") { lastTick = Date.now(); el("curtain").hidden = true; }
+    else if (msg.kind === "question") renderQuestion(msg.training);
+    else if (msg.kind === "answer") { if (msg.training) el("answer").textContent = msg.training.answer || ""; }
+    else if (msg.kind === "scorecard") { renderScorecard(el("scorecard"), msg.scorecard); stage("score"); }
+    else if (msg.kind === "mode_ended") { closeSocket(); if (!el("stage-score").hidden) return; stage("setup"); paintSetup(); }
+    else if (msg.kind === "worker_dead") { el("stale-why").textContent = "The transcript reader stopped — answers are no longer being captured."; el("curtain").hidden = false; }
+  };
+  socket.onclose = () => { if (running) setTimeout(connect, 1000); };
+}
+setInterval(() => {
+  if (running && !el("stage-q").hidden && lastTick && Date.now() - lastTick > 2000) {
+    el("stale-why").textContent = "No update from the copilot for over 2 seconds — your answer may not be updating.";
+    el("curtain").hidden = false;
+  }
+}, 500);
+
+(async () => {
+  const st = await api("/api/status");
+  const a = st.data && st.data.active;
+  if (a && a.mode === "train") { stage("wait"); el("wait-text").textContent = "Reconnecting…"; connect(); setTimeout(() => { if (!el("stage-wait").hidden && el("wait-text").textContent === "Reconnecting…") { stage("setup"); paintSetup(); } }, 1500); }
+  else { stage("setup"); paintSetup(); }
+})();
+</script>
+</body>
+</html>

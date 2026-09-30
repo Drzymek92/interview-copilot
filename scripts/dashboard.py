@@ -63,6 +63,7 @@ import asyncio
 import ipaddress
 import json
 import math
+import re
 import signal
 import subprocess
 import sys
@@ -87,12 +88,17 @@ from fastapi.responses import HTMLResponse, JSONResponse  # noqa: E402
 
 from config import settings  # noqa: E402
 from scripts.logger import get_logger  # noqa: E402
-from scripts.llm_client import announce_backend, cloud_ready, model_for  # noqa: E402
+from scripts.llm_client import (  # noqa: E402
+    BackendUnavailable, announce_backend, cloud_ready, model_for,
+)
 from scripts.reasoning import (  # noqa: E402
     ContextBundle, Controls, PlanStep, follow_transcript, load_bundle, looks_like_question,
     newest_transcript, run_ambient,
 )
 from scripts.salience import SalienceGate  # noqa: E402
+from scripts.training import (  # noqa: E402
+    SessionReport, TrainingSession, generate_questions, score_session,
+)
 
 logger = get_logger("dashboard")
 
@@ -285,6 +291,30 @@ class PlanView:
     mentioned: list[str] = field(default_factory=list)   # the signals literally seen, verbatim
 
 
+@dataclass
+class TrainingView:
+    """The D18 TRAINING-MODE view state (D30 practice track), held so a late-joining browser can
+    be restored: which question is active, the answer accrued for it so far, and — only once the
+    interview is over — the scorecard.
+
+    **The rubric is deliberately NOT here.** During the interview the candidate must not see the
+    grading criteria (that would coach the answer), so a `question` broadcast carries the question
+    text and its competency but never the rubric; the rubric surfaces only inside the `scorecard`
+    after `finish`. `scorecard` is `None` for the whole live phase and a dict once scored.
+    """
+
+    active: bool = False
+    index: int = 0                 # 0-based active-question pointer
+    total: int = 0
+    question_id: str = ""
+    competency: str = ""
+    question: str = ""             # the question text ONLY — rubric withheld until scoring
+    language: str = "en"
+    answer: str = ""               # the live answer transcript accrued for the ACTIVE question
+    finished: bool = False
+    scorecard: dict | None = None
+
+
 class DashboardState:
     """Everything the UI shows, held once, guarded by a lock.
 
@@ -316,6 +346,8 @@ class DashboardState:
         self.provisional: ProvisionalView | None = None
         self._provisional_at: float | None = None
         self._last_final_start = -1.0
+        # D30 training mode. None on a live-copilot run; the TrainingController fills it.
+        self.training: TrainingView | None = None
 
     # -- reads ------------------------------------------------------------
     def snapshot(self) -> dict:
@@ -329,6 +361,7 @@ class DashboardState:
                 "plan": [asdict(step) for step in self.plan],
                 "track_mentions": self.track_mentions,
                 "provisional": asdict(self.provisional) if self.provisional else None,
+                "training": asdict(self.training) if self.training else None,
             }
 
     def history_event(self) -> dict:
@@ -485,7 +518,10 @@ class DashboardState:
         for step in self.plan:
             for phrase in step.done_signals:
                 token = phrase.strip().lower()
-                if token and token in lowered and phrase not in step.mentioned:
+                # Anchored at a WORD START (#1272, e2e round 1): a stem still matches its inflections
+                # ("agent" → "agentów"), but a short signal no longer fires inside another word
+                # ("rest" in "interest"). Still literal and auditable — no fuzzy or LLM matching.
+                if token and phrase not in step.mentioned and re.search(r"(?<!\w)" + re.escape(token), lowered):
                     step.mentioned.append(phrase)
                     changed = True
         return changed
@@ -546,6 +582,45 @@ class DashboardState:
             self.suggestion.status = status
             self.suggestion.note = note
             return {"kind": "suggestion", "suggestion": asdict(self.suggestion)}
+
+    # -- D30 training mode (written by the TrainingController) -------------
+    def set_training_question(self, index: int, total: int, question_id: str, competency: str,
+                              question: str, language: str) -> list[dict]:
+        """Put the ACTIVE question on screen and reset the answer buffer. The rubric is not passed
+        in and is never stored — the candidate must not see the grading criteria mid-interview."""
+        with self._lock:
+            self.training = TrainingView(
+                active=True, index=index, total=total, question_id=question_id,
+                competency=competency, question=question, language=language,
+                answer="", finished=False, scorecard=None,
+            )
+            return [{"kind": "question", "training": asdict(self.training)}]
+
+    def append_training_answer(self, text: str) -> list[dict]:
+        """Accrue one spoken answer segment for the active question and broadcast the running
+        transcript. A no-op (empty list) when no question is active or the session is finished."""
+        with self._lock:
+            if self.training is None or not self.training.active or self.training.finished:
+                return []
+            piece = text.strip()
+            if not piece:
+                return []
+            self.training.answer = (f"{self.training.answer} {piece}".strip()
+                                    if self.training.answer else piece)
+            return [{"kind": "answer",
+                     "training": {"index": self.training.index, "answer": self.training.answer}}]
+
+    def finish_training(self, scorecard: dict) -> list[dict]:
+        """Close the interview and publish the scorecard. Kept in `self.training` so a browser
+        that connects after the interview ended still restores the final scores."""
+        with self._lock:
+            if self.training is None:
+                self.training = TrainingView()
+            self.training.active = False
+            self.training.finished = True
+            self.training.scorecard = scorecard
+            return [{"kind": "scorecard", "scorecard": scorecard,
+                     "training": asdict(self.training)}]
 
 
 # --------------------------------------------------------------------------
@@ -632,9 +707,73 @@ class SuggestionLog:
             logger.exception("could not append a suggestion to %s", self.path)
 
 
+def qa_log_path(transcript_path: Path) -> Path:
+    """Where captured question↔answer pairs are appended for post-interview review (D32).
+    `live_transcript_<stamp>.txt` -> `interview_qa_<stamp>.jsonl`, next to the transcript, so a
+    session's transcript, audio, suggestions and Q&A pairs all share one run stamp (TRK)."""
+    stem = transcript_path.stem
+    stamp = stem[len("live_transcript_"):] if stem.startswith("live_transcript_") else stem
+    return transcript_path.with_name(f"interview_qa_{stamp}.jsonl")
+
+
+class QaPairer:
+    """Pairs each salient interviewer question (a D23 gate fire) with the candidate's answer
+    segments that follow it, appending one JSON line per completed pair to
+    `interview_qa_<stamp>.jsonl` (the D33 pair-log contract; local-only — SI1). `review.py` / the
+    dashboard 'Review answers' action grade these pairs against the CV + JD.
+
+    A `make_sink` consumer, no new seam (D34): fed the same event stream `make_sink` sees — a `gate` fire opens a pair (flushing the prior
+    one); each following `you:` line accumulates into the open answer; `close()` flushes the tail
+    at loop end. A write failure is logged and swallowed — losing the on-disk record must never
+    take the copilot down. Lock-guarded so the review action can `close()` from another thread."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self._lock = threading.RLock()
+        self._question: dict | None = None
+        self._answer: list[str] = []
+        self.pairs_written = 0
+
+    def note_question(self, text: str, stamp: str, language: str | None) -> None:
+        with self._lock:
+            self._flush_locked()  # close whatever the previous question captured first
+            self._question = {"question": text.strip(), "question_stamp": stamp,
+                              "question_language": language or ""}
+            self._answer = []
+
+    def note_answer_line(self, text: str) -> None:
+        with self._lock:
+            if self._question is not None and text.strip():
+                self._answer.append(text.strip())
+
+    def close(self) -> int:
+        """Flush the open pair (call once at loop end). Returns the total pairs written."""
+        with self._lock:
+            self._flush_locked()
+            return self.pairs_written
+
+    def _flush_locked(self) -> None:
+        if self._question is None:
+            return
+        record = {
+            "logged_at": datetime.now(timezone.utc).isoformat(),
+            **self._question,
+            "answer": " ".join(self._answer).strip(),
+        }
+        self._question = None
+        self._answer = []
+        try:
+            with self.path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+            self.pairs_written += 1
+        except Exception:
+            logger.exception("could not append a Q&A pair to %s", self.path)
+
+
 def make_sink(state: DashboardState, bus: EventBus,
               clock: Callable[[], float] = time.monotonic,
-              suggestion_log: "SuggestionLog | None" = None) -> Callable[[dict], None]:
+              suggestion_log: "SuggestionLog | None" = None,
+              qa_pairer: "QaPairer | None" = None) -> Callable[[dict], None]:
     """Translate one `run_ambient` event into state mutations and broadcasts.
 
     Deliberately the only place that knows both halves. `run_ambient` knows nothing about a
@@ -644,12 +783,16 @@ def make_sink(state: DashboardState, bus: EventBus,
     def sink(event: dict) -> None:
         kind = event.get("kind")
         if kind == "line":
+            speaker = str(event.get("speaker", "them"))
             for out in state.add_line(
-                stamp=str(event.get("stamp", "")), speaker=str(event.get("speaker", "them")),
+                stamp=str(event.get("stamp", "")), speaker=speaker,
                 language=event.get("language"), text=str(event.get("text", "")),
                 tagged=bool(event.get("tagged")), at=clock(),
             ):
                 bus.publish(out)
+            # D32 capture: the candidate's own turns feed the open Q&A pair's answer.
+            if qa_pairer is not None and speaker == "you":
+                qa_pairer.note_answer_line(str(event.get("text", "")))
         elif kind == "provisional":
             for out in state.add_provisional(
                 stamp=str(event.get("stamp", "")), speaker=str(event.get("speaker", "them")),
@@ -658,7 +801,14 @@ def make_sink(state: DashboardState, bus: EventBus,
             ):
                 bus.publish(out)
         elif kind == "gate":
-            bus.publish(state.note_gate(bool(event.get("fire"))))
+            fire = bool(event.get("fire"))
+            bus.publish(state.note_gate(fire))
+            # D32 capture: a fired salient question opens (and flushes the prior) Q&A pair.
+            if fire and qa_pairer is not None:
+                qa_pairer.note_question(
+                    str(event.get("text", "")), str(event.get("stamp", "")),
+                    event.get("language"),
+                )
         elif kind == "skip":
             bus.publish(state.note_skip(str(event.get("reason", ""))))
         elif kind == "suggestion":
@@ -788,9 +938,47 @@ class RunInfo:
     provisional: str = "off"   # whether the D25 .partial is being rendered
 
 
+async def dispatch_control(controller: "AppController | TrainingController",
+                           payload: dict) -> JSONResponse:
+    """One switch → the controller. Shared by `create_app`'s `POST /control` and the D35 hub's
+    `POST /api/control`, so the two surfaces cannot drift in what a switch means."""
+    switch = str(payload.get("switch", ""))
+    value = payload.get("value")
+    try:
+        if switch == "training":
+            # start / next / finish — the whole mock-interview drive. Blocking (recorder
+            # spawn on start, the scoring model call on finish), so it runs off the loop.
+            state_dict = await asyncio.to_thread(controller.training_control, str(value))
+            return JSONResponse({"ok": True, **state_dict})
+        if switch == "transcription":
+            state_dict = await asyncio.to_thread(
+                controller.start_transcription if value else controller.stop_transcription)
+            return JSONResponse({"ok": True, **state_dict})
+        if switch == "suggestions":
+            return JSONResponse({"ok": True, **controller.set_suggestions(bool(value))})
+        if switch == "review":
+            # D32: grade the captured Q&A pairs (blocking — one scoring call per answer).
+            if not hasattr(controller, "review"):
+                return JSONResponse({"error": "review is only available in --app mode"},
+                                    status_code=400)
+            state_dict = await asyncio.to_thread(controller.review)
+            return JSONResponse({"ok": True, **state_dict})
+        if switch == "backend":
+            state_dict, banner = await asyncio.to_thread(controller.set_backend, str(value))
+            return JSONResponse({"ok": True, "banner": banner, **state_dict})
+        return JSONResponse({"error": f"unknown switch {switch!r}"}, status_code=400)
+    except ControlError as exc:
+        return JSONResponse({"error": str(exc), **(controller.ui_state() or {})},
+                            status_code=400)
+    except AttributeError:
+        # e.g. a `suggestions` switch sent to the TrainingController, which has no such axis
+        return JSONResponse({"error": f"switch {switch!r} is not available in this mode"},
+                            status_code=400)
+
+
 def create_app(state: DashboardState, bus: EventBus, info: RunInfo,
                ceiling: float, clock: Callable[[], float] = time.monotonic,
-               controller: "AppController | None" = None):
+               controller: "AppController | TrainingController | None" = None):
     """Build the FastAPI app around an already-running `DashboardState`.
 
     `controller` (#607 app mode) enables the inbound `POST /control` switch endpoint. It stays
@@ -809,21 +997,7 @@ def create_app(state: DashboardState, bus: EventBus, info: RunInfo,
         if controller is None:
             return JSONResponse({"error": "control endpoint is off (not running in --app mode)"},
                                 status_code=404)
-        switch = str(payload.get("switch", ""))
-        value = payload.get("value")
-        try:
-            if switch == "transcription":
-                state_dict = await asyncio.to_thread(
-                    controller.start_transcription if value else controller.stop_transcription)
-                return JSONResponse({"ok": True, **state_dict})
-            if switch == "suggestions":
-                return JSONResponse({"ok": True, **controller.set_suggestions(bool(value))})
-            if switch == "backend":
-                state_dict, banner = await asyncio.to_thread(controller.set_backend, str(value))
-                return JSONResponse({"ok": True, "banner": banner, **state_dict})
-            return JSONResponse({"error": f"unknown switch {switch!r}"}, status_code=400)
-        except ControlError as exc:
-            return JSONResponse({"error": str(exc), **controller.ui_state()}, status_code=400)
+        return await dispatch_control(controller, payload)
 
     @app.get("/healthz")
     async def healthz() -> JSONResponse:
@@ -956,7 +1130,9 @@ def _start_provisional(path: Path, state: DashboardState, bus: EventBus,
 
 def _start_worker(args: argparse.Namespace, path: Path, state: DashboardState,
                   bus: EventBus, bundle: ContextBundle | None) -> threading.Thread:
-    sink = make_sink(state, bus, suggestion_log=SuggestionLog(suggestions_log_path(path)))
+    qa_pairer = QaPairer(qa_log_path(path)) if bundle is not None and not args.no_suggestions else None
+    sink = make_sink(state, bus, suggestion_log=SuggestionLog(suggestions_log_path(path)),
+                     qa_pairer=qa_pairer)
 
     def work() -> None:
         try:
@@ -974,6 +1150,9 @@ def _start_worker(args: argparse.Namespace, path: Path, state: DashboardState,
         except Exception:
             logger.exception("the transcript worker died — the dashboard will go stale")
             bus.publish({"kind": "worker_dead"})
+        finally:
+            if qa_pairer is not None:
+                qa_pairer.close()  # flush the last open pair when the tail ends
 
     thread = threading.Thread(target=work, name="transcript-worker", daemon=True)
     thread.start()
@@ -1018,6 +1197,8 @@ class AppController:
         self._recorder: subprocess.Popen | None = None
         self._worker_stop: threading.Event | None = None
         self._current_path: Path | None = None
+        self._qa_pairer: "QaPairer | None" = None   # D32 — the current run's Q&A capture
+        self._last_qa_path: Path | None = None       # survives a stop so review can still run
         self.transcription_on = False
 
     # -- state the UI renders --------------------------------------------------
@@ -1059,6 +1240,8 @@ class AppController:
             if self._worker_stop is not None:
                 self._worker_stop.set()            # ends the follow loops within a poll interval
             self._stop_recorder()                  # SIGINT → wait → kill (we hold the handle)
+            if self._qa_pairer is not None:
+                self._qa_pairer.close()            # D32 — flush the last open Q&A pair to disk
             self.transcription_on = False
             self._current_path = None
             logger.info("transcription OFF — recorder stopped, capture released")
@@ -1109,8 +1292,11 @@ class AppController:
                 logger.exception("recorder did not die on kill()")
 
     def _start_workers(self, path: Path, stop: threading.Event) -> None:
+        self._qa_pairer = QaPairer(qa_log_path(path))   # D32 — capture this run's Q&A pairs
+        self._last_qa_path = self._qa_pairer.path
         sink = make_sink(self.state, self.bus,
-                         suggestion_log=SuggestionLog(suggestions_log_path(path)))
+                         suggestion_log=SuggestionLog(suggestions_log_path(path)),
+                         qa_pairer=self._qa_pairer)
 
         def work() -> None:
             try:
@@ -1153,11 +1339,290 @@ class AppController:
             logger.info("suggestion backend → %s: %s", value, banner)
             return self._broadcast(), banner
 
+    # -- review: grade this run's captured Q&A pairs (D32) ---------------------
+    def review(self) -> dict:
+        """Grade the captured question↔answer pairs against the CV + JD and write a report.
+        Blocking (one scoring call per answered question) — the POST handler runs it off the event
+        loop. Reuses the loaded bundle and the common `score_session`; never touches capture."""
+        from scripts import review as review_mod
+
+        with self._lock:
+            if self._qa_pairer is not None:
+                self._qa_pairer.close()      # flush any open pair so the latest answer is included
+            qa_path = self._last_qa_path
+        if qa_path is None or not qa_path.exists():
+            raise ControlError("no interview captured yet — start transcription and let a "
+                               "question or two be asked and answered first")
+        pairs = review_mod.load_qa_pairs(qa_path)
+        session = review_mod.pairs_to_session(
+            pairs, self.bundle.spoken_language or "en", bundle=self.bundle,
+            backend=self.controls.backend, model=self.controls.model or None)
+        if not session.answered():
+            raise ControlError("no answered question↔answer pairs captured yet — nothing to review")
+        try:
+            report = score_session(
+                session, self.bundle, backend=self.controls.backend,
+                model=self.controls.model or None, report_kind="Interview review",
+                name_prefix="interview_review")
+        except BackendUnavailable as exc:
+            raise ControlError(f"scoring backend unavailable: {exc}") from exc
+        card = scorecard_payload(report)
+        payload = {"kind": "review", "path": str(report.path) if report.path else None,
+                   "answered": len(report.answers), "overall": card["overall"],
+                   "questions": card["questions"]}
+        self.bus.publish(payload)
+        logger.info("interview review written: %s (%d answers)", report.path, len(report.answers))
+        return {"review": {"path": payload["path"], **card["overall"]}}
+
     def shutdown(self) -> None:
         try:
             self.stop_transcription()
         except Exception:
             logger.exception("shutdown: stop_transcription raised")
+
+
+# --------------------------------------------------------------------------
+# 5b. Training mode (D31 — trainer as a dashboard mode, D30 practice bank): a sibling controller
+# --------------------------------------------------------------------------
+def scorecard_payload(report: SessionReport) -> dict:
+    """Render a scored SessionReport as the JSON `scorecard` the browser draws. Only NOW — after
+    the interview — is the rubric revealed (per-criterion levels/scores); nothing here leaves the
+    machine (SI1). Kept plain (floats/ints/strings/lists) so it survives the websocket verbatim."""
+    def one(index: int, ans) -> dict:
+        return {
+            "index": index,
+            "competency": ans.question.competency,
+            "question": ans.question.question,
+            "answer": ans.answer_text,
+            "total": ans.total,
+            "max": ans.max_score,
+            "pct": round(ans.normalized * 100),
+            "criteria": [
+                {"id": c.id, "label": c.label, "level": c.level,
+                 "weight": c.weight, "score": c.score, "note": c.note}
+                for c in ans.per_criterion
+            ],
+            "concepts_to_refresh": list(ans.concepts_to_refresh),
+            "strengths": list(ans.strengths),
+        }
+
+    return {
+        "overall": {
+            "total": report.total, "max": report.max_score,
+            "pct": round(report.normalized * 100), "answered": len(report.answers),
+        },
+        "questions": [one(i, a) for i, a in enumerate(report.answers, start=1)],
+        "report_path": str(report.path) if report.path else None,
+    }
+
+
+class TrainingController:
+    """#650 training mode: a sibling to AppController that drives a mock interview.
+
+    It reuses the recorder lifecycle (spawn / SIGINT the `live_transcribe.py` child) but launches
+    it with `--mic-only` — a monologue capture that tags every segment `you`, with no remote
+    channel. It builds a `TrainingSession` from `training.generate_questions`, tails the transcript
+    through the same D19 `follow_transcript` seam the copilot uses, routes each `you:` segment to
+    the ACTIVE question's answer buffer, and drives the interview through three control values:
+
+        start  → generate the questions, spawn the mic-only recorder, show the first question
+        next   → advance to the next question (auto-finishes + scores after the last one)
+        finish → stop the recorder, score every answer, publish the scorecard, write the report
+
+    Like AppController it is not a governance seat (fw:D2): it starts/stops a process and drives an
+    engine; every grading decision lives in `training.py`. D19 holds — it only TAILS the transcript.
+    """
+
+    def __init__(self, args: argparse.Namespace, state: DashboardState, bus: EventBus,
+                 bundle: ContextBundle, ceiling: float, partials_on: bool) -> None:
+        self.args = args
+        self.state = state
+        self.bus = bus
+        self.bundle = bundle
+        self.ceiling = ceiling
+        self.partials_on = partials_on
+        self.n = getattr(args, "questions", None) or settings.TRAINING_QUESTION_COUNT
+        self._lock = threading.RLock()
+        self._recorder: subprocess.Popen | None = None
+        self._worker_stop: threading.Event | None = None
+        self._current_path: Path | None = None
+        self.session: TrainingSession | None = None
+        self.transcription_on = False
+
+    # -- hello / control state ------------------------------------------------
+    def ui_state(self) -> None:
+        """Training mode does not use the app control bar (the three switches); its state travels
+        in the snapshot's `training` slot instead. Returning None keeps hello's `controls` null so
+        the browser hides that bar — and the control() error branch spreads `... or {}`."""
+        return None
+
+    def _snapshot(self) -> dict:
+        with self._lock:
+            return {
+                "training": asdict(self.state.training) if self.state.training else None,
+                "transcription": self.transcription_on,
+                "source": self._current_path.name if self._current_path else None,
+            }
+
+    # -- the one inbound control: start / next / finish -----------------------
+    def training_control(self, value: str) -> dict:
+        value = (value or "").strip().lower()
+        if value == "start":
+            return self._start()
+        if value == "next":
+            return self._next()
+        if value == "finish":
+            return self._finish()
+        raise ControlError(f"training value must be 'start', 'next' or 'finish', got {value!r}")
+
+    def _start(self) -> dict:
+        with self._lock:
+            if self.transcription_on:
+                raise ControlError("a training session is already running — finish it first")
+            questions = generate_questions(self.bundle, self.n,
+                                           backend=self.args.backend, model=self.args.model)
+            if not questions:
+                raise ControlError("no questions could be generated for this session")
+            self.session = TrainingSession(questions)
+            path = self._spawn_recorder()          # raises ControlError on failure
+            stop = threading.Event()
+            self._worker_stop = stop
+            self._current_path = path
+            self.transcription_on = True
+            self._start_workers(path, stop)
+            active = self.session.active_question
+            logger.info("training START — %d question(s), recorder pid=%s, following %s",
+                        len(questions), self._recorder.pid if self._recorder else "?", path.name)
+            self._publish_question(active)
+            return self._snapshot()
+
+    def _next(self) -> dict:
+        with self._lock:
+            if self.session is None:
+                raise ControlError("no training session is running — start one first")
+            moved = self.session.advance()
+            if moved:
+                self._publish_question(self.session.active_question)
+                return self._snapshot()
+        # The last question has been answered; advancing past the end auto-finishes and scores.
+        return self._finish()
+
+    def _publish_question(self, question) -> None:
+        """Caller holds the lock. Broadcast the active question WITHOUT its rubric."""
+        if question is None:
+            return
+        for out in self.state.set_training_question(
+            index=self.session.active_index, total=len(self.session.questions),
+            question_id=question.id, competency=question.competency,
+            question=question.question, language=question.language,
+        ):
+            self.bus.publish(out)
+
+    def _finish(self) -> dict:
+        with self._lock:
+            if self.session is None:
+                raise ControlError("no training session is running — start one first")
+            if self._worker_stop is not None:
+                self._worker_stop.set()            # end the tail before the transcript is scored
+            self._stop_recorder()
+            self.transcription_on = False
+            self._current_path = None
+            session = self.session
+            session.finish()
+        # Score OUTSIDE the lock: it is a per-answer model call and the endpoint already runs this
+        # off the event loop (asyncio.to_thread). A run with no answers still scores to an empty
+        # report, so the scorecard always lands rather than leaving the UI waiting.
+        report = score_session(session, self.bundle, backend=self.args.backend,
+                               model=self.args.model, output_dir=OUTPUT_DIR)
+        logger.info("training FINISH — %.3g / %.3g over %d answer(s) → %s",
+                    report.total, report.max_score, len(report.answers), report.path)
+        for out in self.state.finish_training(scorecard_payload(report)):
+            self.bus.publish(out)
+        return self._snapshot()
+
+    # -- recorder lifecycle (mic-only) ----------------------------------------
+    def _spawn_recorder(self) -> Path:
+        before = {p.name for p in OUTPUT_DIR.glob("live_transcript_2*.txt")}
+        cmd = [sys.executable, str(SCRIPTS_DIR / "live_transcribe.py"),
+               "--mic-only", "--mic", settings.COPILOT_MIC]
+        if not self.partials_on:
+            cmd.append("--no-partials")
+        try:
+            proc = subprocess.Popen(cmd, cwd=str(PROJECT_ROOT),
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as exc:
+            raise ControlError(f"could not launch the recorder: {exc}") from exc
+        self._recorder = proc
+        deadline = time.monotonic() + max(1.0, settings.COPILOT_RECORDER_WAIT_SECONDS)
+        while time.monotonic() < deadline:
+            for p in sorted(OUTPUT_DIR.glob("live_transcript_2*.txt")):
+                if p.name not in before:
+                    return p
+            if proc.poll() is not None:            # it died before writing a transcript
+                self._recorder = None
+                raise ControlError(
+                    "the recorder exited before capturing audio — check the mic (COPILOT_MIC) "
+                    "and see logs/live_transcribe_*.log"
+                )
+            time.sleep(0.25)
+        self._stop_recorder()
+        raise ControlError(
+            f"the recorder wrote no transcript within {settings.COPILOT_RECORDER_WAIT_SECONDS:g}s "
+            "— is a microphone available? (COPILOT_MIC)"
+        )
+
+    def _stop_recorder(self) -> None:
+        proc, self._recorder = self._recorder, None
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            proc.send_signal(signal.SIGINT)
+            proc.wait(timeout=10)
+        except (subprocess.TimeoutExpired, ProcessLookupError):
+            try:
+                proc.kill()
+                proc.wait(timeout=5)
+            except Exception:
+                logger.exception("recorder did not die on kill()")
+
+    def _start_workers(self, path: Path, stop: threading.Event) -> None:
+        """Tail the transcript and route each `you:` segment to the active question's buffer.
+
+        Not `make_sink`/`tail_only`: the transcript here feeds the TrainingSession, not the
+        line/counter render. It is the same D19 seam (`follow_transcript`) so the parser cannot
+        drift, but the sink is the answer buffer plus a live `answer` broadcast."""
+
+        def work() -> None:
+            try:
+                for _stamp, speaker, _language, text in follow_transcript(
+                    path, from_start=not self.args.from_end, stop_event=stop
+                ):
+                    self._route_answer_segment(speaker, text)
+            except Exception:
+                logger.exception("the training transcript worker died — answers stop accruing")
+                self.bus.publish({"kind": "worker_dead"})
+
+        threading.Thread(target=work, name="training-worker", daemon=True).start()
+
+    def _route_answer_segment(self, speaker: str | None, text: str) -> None:
+        """Route one transcript segment to the ACTIVE question's answer buffer and broadcast the
+        running answer. `--mic-only` tags every segment `you`; anything else is ignored
+        defensively. Split out of the tail loop so it can be driven deterministically."""
+        if self.session is None or (speaker or "them") != "you":
+            return
+        if self.session.add_answer_segment(text):
+            for out in self.state.append_training_answer(text):
+                self.bus.publish(out)
+
+    def shutdown(self) -> None:
+        try:
+            with self._lock:
+                if self._worker_stop is not None:
+                    self._worker_stop.set()
+                self._stop_recorder()
+                self.transcription_on = False
+        except Exception:
+            logger.exception("training shutdown: stop raised")
 
 
 def _run_app(args: argparse.Namespace) -> None:
@@ -1208,6 +1673,54 @@ def _run_app(args: argparse.Namespace) -> None:
         controller.shutdown()            # SIGINT the recorder on exit — never orphan capture
 
 
+def _run_training(args: argparse.Namespace) -> None:
+    """Training mode (#650): the process behind `python scripts/dashboard.py --training --session
+    <id>`. Parallel to `_run_app` — it wires a TrainingController rather than an AppController and
+    serves the same loopback surface. The interview starts idle; the browser's Start button spawns
+    the mic-only recorder and shows the first question."""
+    if not args.session:
+        raise SystemExit("--training requires --session (the interview context bundle)")
+    bundle = load_bundle(args.session)
+    for line in bundle.warn_lines():
+        print(f"  {line}", flush=True)
+
+    ceiling = meter_ceiling(override_seconds=args.ceiling_seconds or None)
+    partials_on = settings.DASHBOARD_SHOW_PARTIALS if args.partials is None else args.partials
+    state = DashboardState(plan=bundle.plan)
+    bus = EventBus()
+    controller = TrainingController(args, state, bus, bundle, ceiling, partials_on)
+    info = RunInfo(
+        source="— (training)",
+        mode="training",
+        session=args.session,
+        salience="n/a (training)",
+        ceiling_seconds=ceiling,
+        suggestions=False,
+        provisional=("on (D25)" if partials_on else "off"),
+    )
+
+    url = f"http://{args.host}:{args.port}"
+    print(f"interview copilot — TRAINING: {url}   (D18/SI1 — loopback only)", flush=True)
+    print(f"  session : {args.session}  ·  questions: {controller.n}  ·  mic-only practice",
+          flush=True)
+    print(f"  mic     : {settings.COPILOT_MIC}"
+          + ("   (set COPILOT_MIC to your external mic for a real mic)" if settings.COPILOT_MIC == "auto" else ""),
+          flush=True)
+    logger.info("training mode starting on %s:%s session=%s questions=%s",
+                args.host, args.port, args.session, controller.n)
+
+    if settings.COPILOT_OPEN_BROWSER:
+        threading.Thread(target=lambda: (time.sleep(1.0), _open_browser(url)),
+                         name="open-browser", daemon=True).start()
+
+    import uvicorn
+    app = create_app(state, bus, info, ceiling, controller=controller)
+    try:
+        uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    finally:
+        controller.shutdown()            # SIGINT the recorder on exit — never orphan capture
+
+
 def _open_browser(url: str) -> None:
     try:
         import webbrowser
@@ -1239,9 +1752,20 @@ def main() -> None:
                         help="single-app mode (#607): the dashboard spawns/kills the recorder itself "
                              "and exposes the three on-screen switches. This is what the desktop "
                              "shortcut launches. Implies a session; no --watch/--follow needed.")
+    parser.add_argument("--training", action="store_true",
+                        help="training mode (#650): a mock interview — asks questions, captures "
+                             "spoken answers with a --mic-only recorder, and shows a scorecard. "
+                             "Implies a session; no --watch/--follow needed.")
+    parser.add_argument("--questions", type=int, default=None,
+                        help="with --training: number of practice questions (default: "
+                             "settings.TRAINING_QUESTION_COUNT, or the bundle's own question_bank)")
     args = parser.parse_args()
 
     _assert_loopback(args.host)          # before anything else opens or reads
+
+    if args.training:
+        _run_training(args)
+        return
 
     if args.app:
         _run_app(args)

@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#12151b">
+<title>Generate context — Interview copilot</title>
+<link rel="stylesheet" href="/static/app.css">
+<!-- D35 Generate view — D29/D30 JD → context bundle. The model writes only the interview side; the
+     user's own CV (pasted or PDF, read locally — D37) is copied in verbatim as the resume. The answer bank
+     and honesty boundary are NEVER generated (D22) — they stay flagged placeholders. -->
+</head>
+<body>
+<header class="topbar">
+  <a class="home" href="/">← Menu</a>
+  <h1>Generate context</h1>
+  <span class="sep">·</span>
+  <span class="disclosure-tag">Disclosed AI assistance (D11)</span>
+  <span class="sep">·</span>
+  <span class="meta">Local only — <code translate="no">127.0.0.1</code></span>
+  <span class="spacer"></span>
+  <button type="button" class="btn small ghost gear" id="gear">⚙ Generation settings</button>
+</header>
+
+<div class="page">
+  <main class="narrow setup" style="max-width:820px">
+    <div>
+      <p class="page-title">Generate context for a call</p>
+      <p class="page-lede">Give it the job description and your CV (paste or PDF). The model writes the interview side of a context bundle — a structured job description, a company brief, an interview plan and practice questions with rubrics — and your CV is added as-is. Call, Train and Review can then all use the bundle.</p>
+    </div>
+
+    <form id="form" class="setup" novalidate>
+      <section class="card" aria-labelledby="c0">
+        <h3 id="c0"><span class="step-no">1</span> Bundle</h3>
+        <div class="field-row" style="margin-top:8px">
+          <label class="field">Bundle name — how you'll pick it in Call, Train and Review
+            <input type="text" id="sid" maxlength="64" pattern="[A-Za-z0-9_][A-Za-z0-9_\-]*" placeholder="company_YYYYMMDD" spellcheck="false" autocomplete="off">
+          </label>
+          <label class="field">Interview spoken in
+            <select id="spoken"><option value="pl">Polish</option><option value="en">English</option></select>
+          </label>
+        </div>
+      </section>
+      <section class="card" aria-labelledby="c1">
+        <h3 id="c1"><span class="step-no">2</span> Job description</h3>
+        <label class="field" style="margin-top:6px"><span class="visually-hidden">Job description text</span>
+          <textarea id="jd" rows="12" placeholder="Paste the full job ad here, or load it from a PDF / .txt / .md file below." required></textarea>
+        </label>
+        <div class="knob-help upload-row" style="margin-top:6px"><span id="jd-count">0</span> characters ·
+          <label style="cursor:pointer"><input type="file" id="jd-file" accept=".pdf,.txt,.md,application/pdf,text/plain,text/markdown" style="display:none"><span class="linkish">load from a PDF / .txt / .md file</span></label>
+          <span class="msg" id="jd-msg" role="status"></span>
+        </div>
+      </section>
+      <section class="card" aria-labelledby="c2">
+        <h3 id="c2"><span class="step-no">3</span> Your CV <span class="faint" style="font-weight:400;font-size:13px">(recommended)</span></h3>
+        <p class="knob-help" style="margin:2px 0 8px">Copied into the bundle word for word as your resume — never rewritten. Suggestions then draw on your real experience, and practice and review grading check your answers against it. Your STAR stories and honesty boundary are still yours to add later.</p>
+        <label class="field"><span class="visually-hidden">CV text</span>
+          <textarea id="cv" rows="8" placeholder="Paste your CV, or load it from a PDF / .txt / .md file below."></textarea>
+        </label>
+        <div class="knob-help upload-row" style="margin-top:6px"><span id="cv-count">0</span> characters ·
+          <label style="cursor:pointer"><input type="file" id="cv-file" accept=".pdf,.txt,.md,application/pdf,text/plain,text/markdown" style="display:none"><span class="linkish">load from a PDF / .txt / .md file</span></label>
+          <span class="msg" id="cv-msg" role="status"></span>
+        </div>
+      </section>
+      <section class="card" aria-labelledby="c3">
+        <h3 id="c3"><span class="step-no">4</span> About this interview <span class="faint" style="font-weight:400;font-size:13px">(optional)</span></h3>
+        <div class="field-row" style="margin-top:8px">
+          <label class="field">Company <input type="text" id="company" maxlength="200" placeholder="e.g. the parent group"></label>
+          <label class="field">Role title <input type="text" id="role" maxlength="200" placeholder="taken from the job description if empty"></label>
+        </div>
+      </section>
+      <div class="actions">
+        <button type="submit" class="btn primary big" id="go">Generate bundle</button>
+        <span class="msg" id="msg" role="status"></span>
+      </div>
+    </form>
+
+    <div id="out"></div>
+  </main>
+</div>
+
+<script src="/static/common.js"></script>
+<script>
+"use strict";
+initSettingsDrawer(el("gear"), "generate", "Generation settings");
+let sidTouched = false, stopPoll = null;
+
+function slug(s) { return (s || "").toLowerCase().normalize("NFKD").replace(/[^\w\s-]/g, "").trim().replace(/[\s-]+/g, "_").slice(0, 40); }
+function today() { const d = new Date(); return d.getFullYear() + String(d.getMonth() + 1).padStart(2, "0") + String(d.getDate()).padStart(2, "0"); }
+function suggestSid() { if (!sidTouched) el("sid").value = (slug(el("company").value) || "interview") + "_" + today(); }
+
+function wireText(area, counter) {
+  const upd = () => { el(counter).textContent = el(area).value.length.toLocaleString(); };
+  el(area).addEventListener("input", upd);
+  return upd;
+}
+const updJd = wireText("jd", "jd-count"), updCv = wireText("cv", "cv-count");
+
+// PDF / .txt / .md → text via the hub (parsed locally, D37); the text lands in the box so it can be checked
+function wireUpload(inputId, areaId, msgId, upd) {
+  el(inputId).addEventListener("change", async (e) => {
+    const f = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!f) return;
+    setMsg(el(msgId), "reading " + f.name + "…");
+    const r = await fileToText(f);
+    if (!r.ok) { setMsg(el(msgId), r.data.error || "could not read that file", "error"); return; }
+    el(areaId).value = r.data.text;
+    upd();
+    setMsg(el(msgId), "✓ " + f.name + (r.data.kind === "pdf" ? " — " + r.data.pages + " page" + (r.data.pages === 1 ? "" : "s") : "")
+      + (r.data.truncated ? " (cut to 60k characters)" : "") + " — check the text above", r.data.truncated ? "error" : "ok");
+  });
+}
+wireUpload("jd-file", "jd", "jd-msg", updJd);
+wireUpload("cv-file", "cv", "cv-msg", updCv);
+el("company").addEventListener("input", suggestSid);
+el("sid").addEventListener("input", () => { sidTouched = true; });
+suggestSid();
+
+el("form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  await submit(false);
+});
+
+async function submit(overwrite) {
+  const body = { jd_text: el("jd").value, cv_text: el("cv").value, company: el("company").value, role: el("role").value,
+                 spoken_language: el("spoken").value, session_id: el("sid").value.trim(), overwrite };
+  el("go").disabled = true;
+  setMsg(el("msg"), "");
+  const r = await api("/api/generate", { method: "POST", body });
+  if (!r.ok) {
+    el("go").disabled = false;
+    if (r.data.exists && confirm("A bundle called “" + body.session_id + "” already exists. Replace it?")) return submit(true);
+    setMsg(el("msg"), r.data.error || "could not start", "error");
+    return;
+  }
+  watch(r.data.job);
+}
+
+function watch(job) {
+  const out = el("out");
+  out.textContent = "";
+  if (job.banner) out.appendChild(h("p", { class: "msg egress", text: job.banner }));
+  const jb = jobBox("Writing the bundle…");
+  out.appendChild(jb.box);
+  el("go").disabled = true;
+  if (stopPoll) stopPoll();
+  stopPoll = pollJob(job.id, (j) => {
+    if (j.status === "running") { jb.set("Writing the plan, company brief and practice questions for “" + j.label + "” — about a minute on the local model…", j.elapsed); return; }
+    el("go").disabled = false;
+    out.textContent = "";
+    if (j.status === "error") { out.appendChild(h("div", { class: "card" }, h("p", { class: "msg error", text: "Generation failed: " + j.error }))); return; }
+    showResult(j.result, j.elapsed);
+  }, 1500);
+}
+
+function showResult(res, elapsed) {
+  const out = el("out");
+  const plan = h("ol", { style: "margin:6px 0 0; padding-left:20px" }, ...(res.plan || []).map((t) => h("li", { text: t })));
+  out.appendChild(h("div", { class: "card setup" },
+    h("div", {}, h("h3", {}, h("span", { class: "ok-text", "aria-hidden": "true", text: "✓ " }), "Bundle “" + res.session + "” is ready"),
+      h("div", { class: "dim", style: "font-size:13px", text: "written in " + Math.round(elapsed) + " s → " + res.path })),
+    h("div", { class: "bundle-sum" },
+      h("div", { class: "role", text: res.role || "(no role derived)" }),
+      res.company ? h("div", { text: res.company }) : null,
+      h("div", { text: (res.plan || []).length + " plan steps · " + res.questions + " practice questions · " + (res.has_resume ? "your CV included" : "no CV") }),
+      plan),
+    (res.placeholders && res.placeholders.length)
+      ? h("p", { class: res.has_resume ? "dim" : "warn-text", style: "margin:0;font-size:13.5px", text: (res.has_resume ? "Optional: " : "⚠ Before a real call, add ") + res.placeholders.join(", ") + (res.has_resume ? " can be added later in " : " to ") + "scripts/inputs/sessions/" + res.session + "/bundle.json." + (res.has_resume ? "" : " Without a CV, grading can't check your answers against your experience.") })
+      : null,
+    h("div", { class: "actions" },
+      h("a", { class: "btn primary", href: "/train?session=" + encodeURIComponent(res.session), text: "Practise with it" }),
+      h("a", { class: "btn", href: "/call?session=" + encodeURIComponent(res.session), text: "Use it for a call" }))));
+}
+
+(async () => {
+  const latest = await api("/api/jobs?kind=generate");
+  const j = latest.data && latest.data.job;
+  if (j && j.status === "running") watch(j);
+})();
+</script>
+</body>
+</html>

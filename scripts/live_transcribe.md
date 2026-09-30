@@ -25,6 +25,8 @@ contain your own voice) and your **mic** (you). They are written to one **stereo
 `scripts.stt.Transcriber` is loaded **once, before capture starts** (~1.2 s warm), and runs in a
 worker thread so the GPU never stalls the capture loop.
 
+- **`--mic-only`** (#649): practice-monologue mode — captures ONLY the mic as a **mono** stream, skips monitor resolution entirely (no "could not resolve a monitor" error), and tags **every** line `you`. Default off; mutually exclusive with `--no-mic`; a supplied `--source` is ignored (there is no remote channel). Writes the same `live_transcript_<stamp>.txt`/`.partial`/`_plain_`/`.wav` with the unchanged D19 line format.
+
 ## Segmentation — VAD, never a fixed clock
 
 Each 20 ms frame is judged per channel by `ChannelGate` = `webrtcvad` **AND** an adaptive noise
