@@ -157,6 +157,87 @@ def test_tactics_absent_renders_a_placeholder_not_a_missing_section(tmp_path):
     assert "(none recorded)" in system
 
 
+# --- #2039: optional candidate.grammatical_gender (D30 amendment 2026-11-23) ---
+def _bundle_with_candidate(tmp_path, candidate_value, name="s1"):
+    session = tmp_path / name
+    session.mkdir()
+    payload = {"schema_version": 2, "resume": {"text": "real content here", "status": "real"}}
+    if candidate_value is not None:
+        payload["candidate"] = candidate_value
+    (session / "bundle.json").write_text(json.dumps(payload), encoding="utf-8")
+    return reasoning.load_bundle(name, sessions_dir=tmp_path)
+
+
+@pytest.mark.parametrize("value", ["feminine", "masculine"])
+def test_candidate_gender_loads_when_set(tmp_path, value):
+    assert _bundle_with_candidate(tmp_path, {"grammatical_gender": value}).candidate_gender == value
+
+
+def test_candidate_gender_is_normalized(tmp_path):
+    assert _bundle_with_candidate(tmp_path, {"grammatical_gender": " Feminine "}).candidate_gender == "feminine"
+
+
+@pytest.mark.parametrize("value", [None, {}, {"grammatical_gender": None}, {"grammatical_gender": ""}])
+def test_candidate_gender_absent_is_unset_without_a_warning(tmp_path, caplog, value):
+    bundle = _bundle_with_candidate(tmp_path, value)
+    assert bundle.candidate_gender is None
+    assert "candidate" not in bundle.placeholders
+    assert not [r for r in caplog.records if "candidate" in r.getMessage() and r.levelname == "WARNING"]
+
+
+@pytest.mark.parametrize("value", [{"grammatical_gender": "neuter"}, {"grammatical_gender": 1},
+                                   "feminine", ["feminine"]])
+def test_candidate_gender_invalid_warns_and_stays_unset(tmp_path, caplog, value):
+    """A typo must never cost the live session: warn, leave it unset, load the rest."""
+    bundle = _bundle_with_candidate(tmp_path, value)
+    assert bundle.candidate_gender is None
+    assert bundle.resume == "real content here"
+    assert any(r.levelname == "WARNING" and "candidate" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("value,form,other", [("feminine", "-łam", "never -łem"),
+                                              ("masculine", "-łem", "never -łam")])
+def test_candidate_gender_renders_one_voice_line_before_the_language_rule(tmp_path, value, form, other):
+    bundle = _bundle_with_candidate(tmp_path, {"grammatical_gender": value})
+    system, _ = reasoning.build_messages(bundle, "Proszę opowiedzieć o sobie.")
+    assert system.count("CANDIDATE VOICE:") == 1
+    assert f"{value.upper()} grammatical gender" in system and form in system and other in system
+    # The language rule stays LAST (session-18b prefix-cache finding): the voice line precedes it,
+    # after the tactics block, and nothing but the language rule follows it.
+    voice_at = system.index("CANDIDATE VOICE:")
+    assert system.index("=== STRATEGIC TACTICS") < voice_at < system.index("LANGUAGE RULE")
+    assert system.rstrip().endswith("Answer it directly.")
+
+
+def test_candidate_gender_unset_prompt_is_byte_identical_to_pre_2039(tmp_path):
+    """Unset must change nothing: rebuild the system prompt from the pre-#2039 template (the current
+    one with the voice slot removed) and compare bytes, for both language-rule variants."""
+    legacy_template = reasoning.SYSTEM_TEMPLATE.replace("{candidate_voice}", "")
+    assert "{candidate_voice}" not in legacy_template and legacy_template.endswith("\n\n{language_rule}\n")
+    unset = _bundle_with_candidate(tmp_path, None, "unset")
+    feminine = _bundle_with_candidate(tmp_path, {"grammatical_gender": "feminine"}, "fem")
+    for lang in (None, "en"):
+        system, _ = reasoning.build_messages(unset, "Proszę opowiedzieć o sobie.", suggestion_language=lang)
+        spoken, target = reasoning.resolve_languages(unset, "Proszę opowiedzieć o sobie.", lang)
+        expected = legacy_template.format(
+            language_rule=reasoning.language_rule(reasoning.LANGUAGE_NAMES[spoken], reasoning.LANGUAGE_NAMES[target]),
+            honesty_boundary=reasoning.EMPTY_HONESTY_RULE, role="(role not specified)",
+            company="(company not specified)", job_description="(not loaded)", company_brief="(not loaded)",
+            resume="real content here", answer_bank="(none)", plan="(no plan loaded)", tactics="(none recorded)",
+        )
+        assert system.encode("utf-8") == expected.encode("utf-8")
+        assert "CANDIDATE VOICE" not in system
+        # Setting the field adds exactly the one voice block and nothing else.
+        set_system, _ = reasoning.build_messages(feminine, "Proszę opowiedzieć o sobie.", suggestion_language=lang)
+        assert set_system.replace(reasoning._candidate_voice(feminine), "") == system
+
+
+def test_candidate_gender_unset_on_the_example_bundle_changes_nothing():
+    """The shipped example bundle carries no `candidate` key — it must load unset."""
+    bundle = reasoning.load_bundle(EXAMPLE_SESSION, sessions_dir=EXAMPLES_DIR)
+    assert bundle.candidate_gender is None
+
+
 def test_missing_referenced_file_is_a_hard_stop(tmp_path):
     session = tmp_path / "s1"
     session.mkdir()

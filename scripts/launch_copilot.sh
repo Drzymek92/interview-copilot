@@ -21,7 +21,7 @@ SESSION="${COPILOT_SESSION:-}"
 # The model resolved exactly as the app resolves it (env > saved Settings > default, D36).
 MODEL="$("$PY" -c 'from config import settings; print(settings.LOCAL_MODEL)' 2>/dev/null || true)"
 MODEL="${MODEL:-${OLLAMA_MODEL:-interview-copilot:14b}}"
-OLLAMA_URL="${OLLAMA_BASE_URL:-http://localhost:11434/v1}"; OLLAMA_URL="${OLLAMA_URL%/v1}"
+OLLAMA_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11434/v1}"; OLLAMA_URL="${OLLAMA_URL%/v1}"
 ( while true; do
     curl -s -m 20 "$OLLAMA_URL/api/generate" -d "{\"model\":\"$MODEL\",\"keep_alive\":\"3h\"}" >/dev/null 2>&1 || true
     sleep 120

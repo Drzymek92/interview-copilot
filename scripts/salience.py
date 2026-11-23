@@ -66,7 +66,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from config import settings
-from scripts.llm_client import get_llm
+from scripts.llm_client import DEFAULT_OLLAMA_BASE_URL, get_llm
 from scripts.logger import get_logger
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids a circular import at runtime
@@ -165,7 +165,7 @@ def embed(texts: Sequence[str], model: str | None = None, timeout: float | None 
     """
     import os
 
-    base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1").rstrip("/")
+    base = os.environ.get("OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL).rstrip("/")
     body = json.dumps({"model": model or settings.SALIENCE_EMBED_MODEL, "input": list(texts)}).encode()
     request = urllib.request.Request(
         f"{base}/embeddings",

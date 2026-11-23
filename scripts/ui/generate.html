@@ -68,6 +68,12 @@
           <label class="field">Company <input type="text" id="company" maxlength="200" placeholder="e.g. the parent group"></label>
           <label class="field">Role title <input type="text" id="role" maxlength="200" placeholder="taken from the job description if empty"></label>
         </div>
+        <div class="field-row" style="margin-top:8px">
+          <label class="field">Your grammatical gender
+            <select id="gender"><option value="">Not set</option><option value="feminine">Feminine (zrobiłam)</option><option value="masculine">Masculine (zrobiłem)</option></select>
+          </label>
+        </div>
+        <p class="knob-help" style="margin:6px 0 0">Suggestions are written as you, in the first person. Set this so forms like the Polish past tense stay the same in every suggestion; leave it unset and the model guesses.</p>
       </section>
       <div class="actions">
         <button type="submit" class="btn primary big" id="go">Generate bundle</button>
@@ -124,7 +130,8 @@ el("form").addEventListener("submit", async (e) => {
 
 async function submit(overwrite) {
   const body = { jd_text: el("jd").value, cv_text: el("cv").value, company: el("company").value, role: el("role").value,
-                 spoken_language: el("spoken").value, session_id: el("sid").value.trim(), overwrite };
+                 spoken_language: el("spoken").value, candidate_gender: el("gender").value,
+                 session_id: el("sid").value.trim(), overwrite };
   el("go").disabled = true;
   setMsg(el("msg"), "");
   const r = await api("/api/generate", { method: "POST", body });
@@ -163,7 +170,8 @@ function showResult(res, elapsed) {
     h("div", { class: "bundle-sum" },
       h("div", { class: "role", text: res.role || "(no role derived)" }),
       res.company ? h("div", { text: res.company }) : null,
-      h("div", { text: (res.plan || []).length + " plan steps · " + res.questions + " practice questions · " + (res.has_resume ? "your CV included" : "no CV") }),
+      h("div", { text: (res.plan || []).length + " plan steps · " + res.questions + " practice questions · " + (res.has_resume ? "your CV included" : "no CV")
+        + (res.candidate_gender ? " · " + res.candidate_gender + " first person" : "") }),
       plan),
     (res.placeholders && res.placeholders.length)
       ? h("p", { class: res.has_resume ? "dim" : "warn-text", style: "margin:0;font-size:13.5px", text: (res.has_resume ? "Optional: " : "⚠ Before a real call, add ") + res.placeholders.join(", ") + (res.has_resume ? " can be added later in " : " to ") + "scripts/inputs/sessions/" + res.session + "/bundle.json." + (res.has_resume ? "" : " Without a CV, grading can't check your answers against your experience.") })

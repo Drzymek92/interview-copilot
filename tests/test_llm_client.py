@@ -148,3 +148,74 @@ def test_prefill_bundle_caps_output_at_the_raw_request_level(monkeypatch, tmp_pa
     assert captured["body"]["max_tokens"] == 1
     assert "max_completion_tokens" not in captured["body"]
     assert took >= 0.0
+
+
+# ── #2037: the default Ollama endpoint is 127.0.0.1, never localhost ───────────────────────
+# On Windows `localhost` tries IPv6 first and Ollama listens on IPv4 only: ~2 s per model call.
+EXPECTED_DEFAULT = "http://127.0.0.1:11434/v1"
+
+
+def test_the_default_ollama_url_is_ipv4_loopback():
+    assert llm_client.DEFAULT_OLLAMA_BASE_URL == EXPECTED_DEFAULT
+    assert "localhost" not in llm_client.DEFAULT_OLLAMA_BASE_URL
+
+
+def test_the_local_raw_http_path_defaults_to_127(monkeypatch):
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+    captured: dict = {}
+    _install_fake_urlopen(monkeypatch, captured, out_tokens=1)
+    llm_client.llm_call("hello", backend="local", max_tokens=1)
+    assert captured["url"] == EXPECTED_DEFAULT + "/chat/completions"
+
+
+def test_the_langchain_local_client_defaults_to_127(monkeypatch):
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+    llm = llm_client.get_llm(backend="local")
+    assert str(llm.openai_api_base).rstrip("/") == EXPECTED_DEFAULT
+
+
+def test_salience_embeddings_default_to_127(monkeypatch):
+    from scripts import salience
+
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+    seen: dict = {}
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps({"data": [{"embedding": [0.0]}]}).encode()
+
+    def fake_urlopen(request, timeout=None):  # noqa: ARG001
+        seen["url"] = request.full_url
+        return _Resp()
+
+    monkeypatch.setattr(salience.urllib.request, "urlopen", fake_urlopen)
+    salience.embed(["hi"])
+    assert seen["url"] == EXPECTED_DEFAULT + "/embeddings"
+
+
+def test_app_hub_status_probe_defaults_to_127(monkeypatch):
+    from scripts import app_hub
+
+    monkeypatch.delenv("OLLAMA_BASE_URL", raising=False)
+    seen: dict = {}
+
+    def fake_urlopen(url, timeout=None):  # noqa: ARG001
+        seen["url"] = url
+        raise OSError("no server in a unit test")
+
+    monkeypatch.setattr(app_hub.urllib.request, "urlopen", fake_urlopen)
+    assert app_hub.ollama_status()["reachable"] is False
+    assert seen["url"] == "http://127.0.0.1:11434/api/ps"
+
+
+def test_no_shipped_default_still_says_localhost():
+    """Every place that states the default — code, launcher, .env template, docs table."""
+    for rel in ("scripts/llm_client.py", "scripts/salience.py", "scripts/app_hub.py",
+                "scripts/launch_copilot.sh", "scripts/reasoning.md", "config/.env.example"):
+        assert "localhost:11434" not in (PROJECT_ROOT / rel).read_text(encoding="utf-8"), rel

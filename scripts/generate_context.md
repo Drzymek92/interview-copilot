@@ -31,6 +31,11 @@ Run under a GPU lease when the local backend must load a model
 
 Left as flagged placeholders (never generated — D22): `resume`, `answer_bank`, `honesty_boundary`.
 
+`--candidate-gender {feminine,masculine}` (#2039) writes `candidate.grammatical_gender` — a fact you
+state, not generated content (D22 holds) — so suggestions keep first-person forms consistent (Polish
+`-łam`/`-łem`). Omitted → no `candidate` key at all. The Generate view's optional select drives the
+same field (blank = unset). See `reasoning.md` §3c.
+
 ## Role: derived from the JD, `--role` always wins (#659)
 Before #659 an omitted `--role` left the bundle's `role` blank, even though the flag's own help
 text claimed it "defaults to what the JD implies" — the scorecard header just came up empty. The

@@ -38,7 +38,7 @@ from config import settings  # noqa: E402
 from scripts.llm_client import BackendUnavailable, llm_call, model_for, resolve_backend  # noqa: E402
 from scripts.doc_text import SUPPORTED_SUFFIXES, read_path  # noqa: E402
 from scripts.logger import get_logger  # noqa: E402
-from scripts.reasoning import RUBRIC_LEVELS, SESSIONS_DIR, load_bundle  # noqa: E402
+from scripts.reasoning import CANDIDATE_GENDERS, RUBRIC_LEVELS, SESSIONS_DIR, load_bundle  # noqa: E402
 
 logger = get_logger("generate_context")
 
@@ -298,11 +298,12 @@ def _clean_signals(raw: object) -> list[str]:
 def build_bundle(
     sections: dict, session_id: str, role: str, company: str,
     spoken_language: str, suggestion_language: str, jd_source: str,
-    resume_text: str = "", resume_source: str = "",
+    resume_text: str = "", resume_source: str = "", candidate_gender: str = "",
 ) -> dict:
     """Assemble the schema-v2 bundle dict: generated interview-side sections + candidate-side
     placeholders. The candidate sections are markers, not empty content, so load_bundle flags
-    them (D22)."""
+    them (D22). `candidate_gender` ("feminine"/"masculine") is a fact the USER states, written
+    as `candidate.grammatical_gender` (#2039); blank leaves the key out entirely."""
     default_lang = spoken_language or "en"
     # `role` wins whenever the caller passed one explicitly (`--role`); otherwise fall back to
     # whatever the model derived from the JD (D30 extension, #659) — never a second LLM call,
@@ -331,6 +332,11 @@ def build_bundle(
         "answer_bank": dict(PLACEHOLDER),
         "honesty_boundary": dict(PLACEHOLDER),
     }
+    gender = (candidate_gender or "").strip().lower()
+    if gender:
+        if gender not in CANDIDATE_GENDERS:
+            raise ValueError(f"candidate gender must be one of {CANDIDATE_GENDERS}, got {candidate_gender!r}")
+        bundle["candidate"] = {"grammatical_gender": gender}
     return bundle
 
 
@@ -376,6 +382,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", help="override the backend's model")
     parser.add_argument("--spoken-language", default="pl", help="the interview's spoken language for the bundle's language block")
     parser.add_argument("--suggestion-language", default="match", help="the bundle's suggestion language (match|en|pl)")
+    parser.add_argument(
+        "--candidate-gender", choices=CANDIDATE_GENDERS, default="",
+        help="your grammatical gender, so suggestions use consistent first-person forms "
+             "(Polish -łam/-łem); written as candidate.grammatical_gender. Omit to leave it unset",
+    )
     return parser
 
 
@@ -403,6 +414,7 @@ def run(args: argparse.Namespace, sessions_dir: Path | None = None) -> Path:
         sections, args.session, args.role, args.company,
         args.spoken_language, args.suggestion_language, jd_source,
         resume_text=resume_text, resume_source=resume_source,
+        candidate_gender=getattr(args, "candidate_gender", "") or "",
     )
     target = write_bundle(bundle, args.session, sessions_dir)
     logger.info("wrote %s", target)
@@ -430,6 +442,7 @@ def main() -> None:
     )
     crit_total = sum(len(q.rubric.criteria) for q in bundle.question_bank)
     print(f"  rubric criteria across the bank: {crit_total}")
+    print(f"  candidate grammatical gender: {bundle.candidate_gender or 'unset'}")
     warnings = bundle.warn_lines()
     if warnings:
         print("  candidate-side sections left as placeholders (fill these before the interview):")

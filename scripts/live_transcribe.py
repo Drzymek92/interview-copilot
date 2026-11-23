@@ -849,6 +849,31 @@ def transcribe_worker(
             trace.record(seg, result, wait, behind, dropped=False)
 
 
+def install_stop_handlers(stop: threading.Event) -> list[int]:
+    """Route every graceful-stop signal to `stop` so the run loop drains, flushes and prints
+    `=== RUN COMPLETE ===`. Returns the signals it installed on.
+
+    SIGINT is Ctrl-C (and what the dashboard sends on POSIX). On Windows the dashboard spawns this
+    process in its own group and stops it with CTRL_BREAK_EVENT, which Python delivers as
+    SIGBREAK — whose DEFAULT action kills the process outright, skipping the flush (#2036). So
+    SIGBREAK gets the same handler wherever the platform defines it. A second signal means "now".
+    """
+    def on_stop(signum: int, frame: object) -> None:
+        if stop.is_set():  # a second Ctrl-C / Ctrl-Break means "now"
+            signal.signal(signum, signal.SIG_DFL)
+            raise KeyboardInterrupt
+        stop.set()
+        print("\n[stopping — finishing pending decodes; Ctrl-C again to force]", flush=True)
+
+    installed = [signal.SIGINT]
+    sigbreak = getattr(signal, "SIGBREAK", None)   # Windows only
+    if sigbreak is not None:
+        installed.append(sigbreak)
+    for signum in installed:
+        signal.signal(signum, on_stop)
+    return installed
+
+
 def run_loop(args: argparse.Namespace) -> int:
     import webrtcvad
 
@@ -969,15 +994,7 @@ def run_loop(args: argparse.Namespace) -> int:
                 out.wav_path, out.transcript_path, out.plain_path, out.partial_path)
 
     stop = threading.Event()
-
-    def on_sigint(signum: int, frame: object) -> None:
-        if stop.is_set():  # a second Ctrl-C means "now"
-            signal.signal(signal.SIGINT, signal.SIG_DFL)
-            raise KeyboardInterrupt
-        stop.set()
-        print("\n[stopping — finishing pending decodes; Ctrl-C again to force]", flush=True)
-
-    signal.signal(signal.SIGINT, on_sigint)
+    install_stop_handlers(stop)
 
     stats = new_stats()
     work: queue.Queue = queue.Queue()

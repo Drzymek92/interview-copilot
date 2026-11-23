@@ -55,10 +55,12 @@ from scripts.dashboard import (  # noqa: E402
     _assert_loopback, _open_browser, _tick_loop, dispatch_control, meter_ceiling,
     scorecard_payload,
 )
-from scripts.llm_client import announce_backend, cloud_ready, model_for  # noqa: E402
+from scripts.llm_client import (  # noqa: E402
+    DEFAULT_OLLAMA_BASE_URL, announce_backend, cloud_ready, model_for,
+)
 from scripts.doc_text import DocTextError, extract_text  # noqa: E402
 from scripts.logger import get_logger  # noqa: E402
-from scripts.reasoning import SESSIONS_DIR, load_bundle  # noqa: E402
+from scripts.reasoning import CANDIDATE_GENDERS, SESSIONS_DIR, load_bundle  # noqa: E402
 
 logger = get_logger("app_hub")
 
@@ -210,7 +212,7 @@ def list_reports(output_dir: Path | None = None) -> list[dict]:
 
 def ollama_status(timeout: float = 0.6) -> dict:
     """Is the local model server up, and which models are resident? Loopback only; never raises."""
-    base = (os.environ.get("OLLAMA_BASE_URL") or "http://localhost:11434/v1").removesuffix("/v1")
+    base = (os.environ.get("OLLAMA_BASE_URL") or DEFAULT_OLLAMA_BASE_URL).removesuffix("/v1")
     try:
         with urllib.request.urlopen(f"{base}/api/ps", timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
@@ -337,9 +339,16 @@ class ModeManager:
         if active is None:
             return
         try:
-            active.controller.shutdown()       # SIGINTs the recorder if one is running
+            active.controller.shutdown()       # stops the recorder (bounded, never raises — #2036)
         except Exception:
             logger.exception("mode %s: shutdown raised", active.name)
+        if getattr(active.controller, "recorder_alive", False) is True:
+            # The kill fallback failed too — the hub is dropping this mode, so name the pid
+            # loudly rather than orphan a capture process silently (#2036).
+            proc = getattr(active.controller, "_recorder", None)
+            logger.error("mode %s: recorder pid=%s is STILL running after shutdown — end it "
+                         "manually (it may still hold the mic)", active.name,
+                         getattr(proc, "pid", "?"))
         active.bus.publish({"kind": "mode_ended", "mode": active.name})
         logger.info("mode %s ended (bundle %s)", active.name, active.session)
 
@@ -450,19 +459,22 @@ def run_review_job(qa_name: str, session: str, output_dir: Path | None = None,
 
 
 def run_generate_job(jd_text: str, session_id: str, role: str, company: str,
-                     spoken_language: str, sessions_dir: Path | None = None, cv_text: str = "") -> dict:
+                     spoken_language: str, sessions_dir: Path | None = None, cv_text: str = "",
+                     candidate_gender: str = "") -> dict:
     from scripts import generate_context as gen
 
     args = argparse.Namespace(
         jd=jd_text, session=session_id, company=company, role=role, company_notes="", cv=cv_text,
         questions_per_competency=settings.GENERATE_QUESTIONS_PER_COMPETENCY, backend=None,
         model=None, spoken_language=spoken_language, suggestion_language="match",
+        candidate_gender=candidate_gender,
     )
     target = gen.run(args, sessions_dir=sessions_dir)
     bundle = load_bundle(session_id, sessions_dir=sessions_dir)
     return {"session": session_id, "path": str(target), "role": bundle.role, "company": bundle.company,
             "plan": [s.title for s in bundle.plan], "questions": len(bundle.question_bank),
-            "has_resume": bool(bundle.resume.strip()), "placeholders": list(bundle.placeholders)}
+            "has_resume": bool(bundle.resume.strip()), "placeholders": list(bundle.placeholders),
+            "candidate_gender": bundle.candidate_gender}
 
 
 # --------------------------------------------------------------------------
@@ -658,6 +670,7 @@ def create_hub(manager: ModeManager | None = None, jobs: Jobs | None = None,
         role = str(payload.get("role", "")).strip()[:200]
         company = str(payload.get("company", "")).strip()[:200]
         spoken = str(payload.get("spoken_language", "pl"))
+        candidate_gender = str(payload.get("candidate_gender") or "").strip().lower()
         if len(jd_text) < 80:
             return JSONResponse({"error": "paste the full job description (at least a few sentences)"},
                                 status_code=400)
@@ -674,13 +687,16 @@ def create_hub(manager: ModeManager | None = None, jobs: Jobs | None = None,
                                 status_code=400)
         if spoken not in ("pl", "en"):
             return JSONResponse({"error": "spoken language must be pl or en"}, status_code=400)
+        if candidate_gender and candidate_gender not in CANDIDATE_GENDERS:
+            return JSONResponse({"error": "grammatical gender must be feminine, masculine or blank"},
+                                status_code=400)
         if (SESSIONS_DIR / session_id / "bundle.json").exists() and not payload.get("overwrite"):
             return JSONResponse({"error": f"a bundle named {session_id!r} already exists",
                                  "exists": True}, status_code=409)
         try:
             job = jobs.submit("generate", session_id,
                               lambda: run_generate_job(jd_text, session_id, role, company, spoken,
-                                                       cv_text=cv_text),
+                                                       cv_text=cv_text, candidate_gender=candidate_gender),
                               banner=_egress_banner(settings.GENERATE_BACKEND))
         except HubError as exc:
             return _err(exc)

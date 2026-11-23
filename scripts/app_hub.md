@@ -59,7 +59,9 @@ into the "Default — generic AI tech job (no bundle selected)" option (value `"
 
 `POST /api/extract {filename, data_b64}` → `{text, pages, chars, truncated, kind}` via `scripts/doc_text.py`
 (PDF/.txt/.md, ≤10 MB, stateless). `/api/generate` takes an optional `cv_text` (≤60k), copied verbatim into the
-bundle's `resume` by `generate_context.run(cv=...)`.
+bundle's `resume` by `generate_context.run(cv=...)`, and an optional `candidate_gender`
+(`feminine`/`masculine`, blank = unset, anything else → 400) written as `candidate.grammatical_gender`
+(#2039; the Generate view's "Your grammatical gender" select).
 
 ## Input guards (SI1 — nothing here takes a path)
 

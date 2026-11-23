@@ -310,7 +310,7 @@ def test_generate_guards(env, payload, status):
 def test_generate_job_runs_with_the_form_values(env, monkeypatch):
     seen = {}
 
-    def fake(jd_text, session_id, role, company, spoken, cv_text=""):
+    def fake(jd_text, session_id, role, company, spoken, cv_text="", candidate_gender=""):
         seen.update(jd=len(jd_text), sid=session_id, role=role, company=company, spoken=spoken)
         return {"session": session_id}
 
@@ -415,6 +415,45 @@ def test_generate_passes_the_cv(env, monkeypatch):
     _wait(c, r.json()["job"]["id"])
     assert seen["cv"] == "My CV"
     assert c.post("/api/generate", json={"jd_text": "y" * 300, "cv_text": "z" * 60001, "session_id": "cv_2"}).status_code == 400
+
+
+@pytest.mark.parametrize("sent,expected", [("feminine", "feminine"), ("Masculine", "masculine"),
+                                           ("", ""), (None, "")])
+def test_generate_passes_the_candidate_gender(env, monkeypatch, sent, expected):
+    """#2039: the Generate view's optional select reaches run_generate_job (blank = unset)."""
+    seen = {}
+    monkeypatch.setattr(hub, "run_generate_job",
+                        lambda *a, candidate_gender="", **k: seen.update(g=candidate_gender) or {})
+    c = env["client"]
+    body = {"jd_text": "y" * 300, "session_id": "g_1"}
+    if sent is not None:
+        body["candidate_gender"] = sent
+    _wait(c, c.post("/api/generate", json=body).json()["job"]["id"])
+    assert seen["g"] == expected
+
+
+def test_generate_rejects_an_unknown_candidate_gender(env):
+    r = env["client"].post("/api/generate", json={"jd_text": "y" * 300, "session_id": "g_2",
+                                                  "candidate_gender": "neuter"})
+    assert r.status_code == 400 and "gender" in r.json()["error"]
+
+
+def test_run_generate_job_writes_the_candidate_gender(tmp_path, monkeypatch):
+    from scripts import generate_context as gen
+    monkeypatch.setattr(gen, "generate_sections", lambda *a, **k: {"plan": [], "question_bank": []})
+    monkeypatch.setattr(reasoning, "SESSIONS_DIR", tmp_path)
+    res = hub.run_generate_job("x" * 200, "fem_1", "", "Acme", "pl", sessions_dir=tmp_path,
+                               candidate_gender="feminine")
+    assert res["candidate_gender"] == "feminine"
+    raw = json.loads((tmp_path / "fem_1" / "bundle.json").read_text(encoding="utf-8"))
+    assert raw["candidate"] == {"grammatical_gender": "feminine"}
+
+
+def test_generate_page_has_the_optional_gender_select(env):
+    html = env["client"].get("/generate").text
+    assert 'id="gender"' in html and '<option value="">Not set</option>' in html
+    assert 'value="feminine"' in html and 'value="masculine"' in html
+    assert 'candidate_gender: el("gender").value' in html
 
 
 def test_socket_closed_by_the_client_is_not_logged_as_an_error(env, caplog):

@@ -92,6 +92,17 @@ python scripts/app_hub.py --open-path "/call?session=example_ai_engineer"   # st
 pytest tests/ ; ruff check .
 ```
 
+Bundle keys are documented in [`docs/SESSION_BUNDLE.md`](docs/SESSION_BUNDLE.md). One optional key
+worth knowing for Polish interviews: `"candidate": {"grammatical_gender": "feminine"}` (or `"masculine"`)
+keeps first-person forms consistent across suggestions (`-łam` / `-łem`); set it with
+`generate_context.py --candidate-gender` or the Generate view, or add it by hand. Unset, the model
+guesses per suggestion.
+
+Configuration: copy `config/.env.example` to `config/.env`. The local Ollama default is
+`OLLAMA_BASE_URL="http://127.0.0.1:11434/v1"` — **update an existing `config/.env` that still says
+`localhost`**: on Windows `localhost` tries IPv6 first while Ollama listens on IPv4 only, which
+adds ~2 s to every model call.
+
 ## Governance & design docs
 
 Built with a lightweight in-house **design + decision OS**: every locked decision is stated once in

@@ -7,6 +7,26 @@ for public readers; the *why* behind each design choice lives in
 The project is a personal / portfolio build, not a versioned release product, so this is grouped by
 capability milestone rather than by semantic version.
 
+## 2026-11-23 — Windows field-test fixes
+
+- **Recorder stop no longer crashes or orphans capture on Windows** — stopping a call or a practice
+  run used to raise (`SIGINT` is unsupported there), crash the hub, and leave the recorder capturing
+  mic and speaker audio. The recorder now starts in its own process group and is stopped with
+  Ctrl-Break (POSIX keeps `SIGINT`), so it shuts down gracefully and still flushes `RUN COMPLETE`;
+  any signal failure or timeout falls back to a kill. The stop path never raises, and a recorder
+  that is still alive blocks a new one instead of being orphaned.
+- **Ollama default is now `http://127.0.0.1:11434/v1`** (was `localhost`). On Windows `localhost`
+  tries IPv6 first while Ollama listens on IPv4 only, which cost ~2 s on every model call.
+  **Existing users: update `OLLAMA_BASE_URL` in your `config/.env`** if it still says `localhost`.
+- **`.gitattributes` line-ending guard** — text is stored and checked out as LF on every OS, so a
+  CRLF-saving editor cannot turn a file into a whole-file diff (Windows scripts stay CRLF, CSVs and
+  binaries are left untouched).
+- **Optional candidate grammatical gender in the bundle (D30 amended)** —
+  `"candidate": {"grammatical_gender": "feminine"|"masculine"}` keeps first-person forms consistent
+  across suggestions (Polish `-łam` / `-łem`). Set it by hand, with
+  `generate_context.py --candidate-gender`, or from the Generate view; unset leaves the prompt
+  byte-identical. See [`docs/SESSION_BUNDLE.md`](docs/SESSION_BUNDLE.md).
+
 ## 2026-09-30 — hub, practice track, review
 
 - **One hub process (D35)** — `scripts/app_hub.py`: an opening menu (Start a call · Train · Review ·

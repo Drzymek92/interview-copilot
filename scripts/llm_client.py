@@ -4,7 +4,7 @@ Two backends behind one call, selected by `REASONING_BACKEND` (CFG, `config/sett
 
 | backend  | how it is reached                          | key                    | egress |
 |----------|--------------------------------------------|------------------------|--------|
-| `local`  | Ollama `localhost:11434/v1`, no vendor SDK | placeholder (`ollama`) | none   |
+| `local`  | Ollama `127.0.0.1:11434/v1`, no vendor SDK | placeholder (`ollama`) | none   |
 | `cloud`  | Claude via the official `anthropic` SDK    | `CLOUD_API_KEY`, BYOK  | YES    |
 
 **SI1 (non-waivable).** Interview audio, transcript and the context bundle are local by default.
@@ -68,6 +68,11 @@ try:
 except Exception:  # noqa: BLE001 — a missing dotenv must never block a local run
     pass
 
+
+# The local Ollama endpoint when OLLAMA_BASE_URL is unset. 127.0.0.1, NOT localhost (#2037): on
+# Windows localhost resolves IPv6 first and Ollama listens on IPv4 only, so every call paid a
+# ~2 s fallback (measured 2.07/2.02/2.06 s vs <=0.002 s).
+DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
 
 # Above this chars-per-token ratio the backend cannot have seen everything that was sent.
 TRUNCATION_CHARS_PER_TOKEN = 7.0
@@ -228,7 +233,7 @@ def get_llm(
     if True:
         # localhost needs no real key; Ollama ignores the value but the client
         # requires a non-empty string.
-        base_url = _cfg("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+        base_url = _cfg("OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL)
         api_key = _cfg("OLLAMA_API_KEY", "ollama")
         # Qwen3 is a THINKING model: it burns reasoning tokens Ollama then strips out of
         # `content`, so you pay seconds of latency for text you never see (measured
@@ -361,7 +366,7 @@ def _stream_local(
     if settings.LOCAL_DISABLE_THINKING:
         body["reasoning_effort"] = "none"
 
-    url = _cfg("OLLAMA_BASE_URL", "http://localhost:11434/v1").rstrip("/") + "/chat/completions"
+    url = _cfg("OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL).rstrip("/") + "/chat/completions"
     request = urllib.request.Request(
         url, data=json.dumps(body).encode("utf-8"), headers={"Content-Type": "application/json"}
     )

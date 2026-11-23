@@ -1,0 +1,35 @@
+# Line-ending guard (#2038). Text is stored and checked out as LF on every OS, so an editor that
+# saves CRLF (e.g. on Windows) cannot turn every line of a file into a diff.
+* text=auto eol=lf
+
+# Windows-native scripts must stay CRLF (cmd.exe misparses LF-only .bat/.cmd files).
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# CSV is written by Python's csv module with CRLF row terminators (RFC 4180); keep those files
+# byte-exact rather than renormalising them into a whole-file diff.
+*.csv -text
+
+# Binary — never touch line endings or attempt a text diff.
+*.wav    binary
+*.mp3    binary
+*.flac   binary
+*.ogg    binary
+*.m4a    binary
+*.pdf    binary
+*.docx   binary
+*.xlsx   binary
+*.pptx   binary
+*.zip    binary
+*.gz     binary
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.ico    binary
+*.webp   binary
+*.duckdb binary
+*.parquet binary
+*.npy    binary
+*.pt     binary

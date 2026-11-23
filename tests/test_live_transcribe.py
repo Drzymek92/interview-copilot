@@ -828,3 +828,51 @@ def test_line_29_stall_explained_by_the_drift_decomposition():
                                                # amount the latency-step model expected
     assert mon.max_drift == pytest.approx(residual, abs=0.01)
     assert mon.total_drift == pytest.approx(residual, abs=0.01)
+
+
+# ── #2036: graceful stop on Windows — CTRL_BREAK arrives as SIGBREAK ────────────────────────
+def _capture_signal_installs(monkeypatch) -> dict:
+    """Record signal.signal() installs instead of touching this test process's handlers."""
+    import signal as sig_mod
+    installed: dict = {}
+    monkeypatch.setattr(sig_mod, "signal", lambda signum, handler: installed.__setitem__(signum, handler))
+    return installed
+
+
+def test_sigbreak_gets_the_graceful_stop_handler_when_the_platform_has_it(monkeypatch):
+    import signal as sig_mod
+    import threading
+    fake_sigbreak = 21                                     # Windows' SIGBREAK number
+    monkeypatch.setattr(sig_mod, "SIGBREAK", fake_sigbreak, raising=False)
+    installed = _capture_signal_installs(monkeypatch)
+    stop = threading.Event()
+
+    signums = lt.install_stop_handlers(stop)
+
+    assert signums == [sig_mod.SIGINT, fake_sigbreak]
+    assert installed[fake_sigbreak] is installed[sig_mod.SIGINT]   # the SAME flush path
+    installed[fake_sigbreak](fake_sigbreak, None)
+    assert stop.is_set(), "CTRL_BREAK must request the graceful stop, not kill the process"
+
+
+def test_without_sigbreak_only_sigint_is_installed(monkeypatch):
+    import signal as sig_mod
+    import threading
+    monkeypatch.delattr(sig_mod, "SIGBREAK", raising=False)
+    installed = _capture_signal_installs(monkeypatch)
+    assert lt.install_stop_handlers(threading.Event()) == [sig_mod.SIGINT]
+    assert list(installed) == [sig_mod.SIGINT]
+
+
+def test_a_second_stop_signal_forces_an_immediate_exit(monkeypatch):
+    import signal as sig_mod
+    import threading
+    monkeypatch.delattr(sig_mod, "SIGBREAK", raising=False)
+    installed = _capture_signal_installs(monkeypatch)
+    stop = threading.Event()
+    lt.install_stop_handlers(stop)
+    handler = installed[sig_mod.SIGINT]
+    handler(sig_mod.SIGINT, None)
+    with pytest.raises(KeyboardInterrupt):
+        handler(sig_mod.SIGINT, None)
+    assert installed[sig_mod.SIGINT] is sig_mod.SIG_DFL     # reset so a third one is fatal

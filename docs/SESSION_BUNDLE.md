@@ -44,6 +44,7 @@ marked as a placeholder is **reported on every load** so a stub is never mistake
 | `answer_bank` | array of STAR entries | no | Prepared answers (see below). |
 | `plan` | array of plan steps | no | The interview plan (see below). |
 | `honesty_boundary` | array of claim/truth rows | no | **v2. The highest-consequence block** (see below). |
+| `candidate.grammatical_gender` | `"feminine"`/`"masculine"` | no | Pins first-person forms in suggestions (see below). Unset → the model guesses per suggestion. |
 
 ### Sections (`job_description`, `company_brief`, `resume`)
 Each is one of:
@@ -101,6 +102,21 @@ with X", and answer a question touching one with the true version.
 > recoverable, a claim that collapses under one follow-up is not. **The boundary only protects
 > claims that are *listed*** (D22): for any topic where you must not round up, add a row, or the
 > model may helpfully overstate it.
+
+### `candidate` — grammatical gender (optional)
+Polish past-tense verbs agree with the speaker (`zrobiłam` / `zrobiłem`). Without a hint the model
+guesses per suggestion and can mix the two forms within one call. State it once:
+
+```json
+"candidate": {"grammatical_gender": "feminine"}
+```
+
+When set, the suggestion prompt gains one `CANDIDATE VOICE:` line (about +75 tokens); when absent
+the prompt is unchanged. A malformed block or an unknown value is ignored with a warning, never a
+load failure. It is a fact you state, never generated: set it by hand, with
+`generate_context.py --candidate-gender {feminine,masculine}`, or with the Generate view's optional
+select. Only the live suggestion prompt uses it — the practice/review grading prompts talk *about*
+the candidate and ignore it.
 
 ## Authoring tips
 - Keep the whole bundle under the model's context window. The custom Ollama models bake `num_ctx`

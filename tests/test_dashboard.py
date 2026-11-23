@@ -1493,3 +1493,176 @@ class TestReviewUi:
         assert re.search(r"innerHTML\s*=", block) is None
         assert "insertAdjacentHTML" not in block
         assert "textContent" in block
+
+
+# ── #2036: recorder stop on Windows — simulated (no Windows box here) ────────────────────────
+import signal as _signal  # noqa: E402
+import subprocess as _subprocess  # noqa: E402
+
+
+class FakeProc:
+    """A Popen double. `signal_error` makes send_signal raise (the Windows SIGINT ValueError);
+    `ignores_signal` keeps it running after the signal; `unkillable` survives kill() too.
+    `seen_handle` records whether the owning controller still held this handle while waiting."""
+
+    def __init__(self, *, signal_error: Exception | None = None, ignores_signal: bool = False,
+                 unkillable: bool = False, owner=None, pid: int = 424242) -> None:
+        self.pid = pid
+        self.signal_error = signal_error
+        self.ignores_signal = ignores_signal
+        self.unkillable = unkillable
+        self.owner = owner
+        self.returncode: int | None = None
+        self.signals: list[int] = []
+        self.kills = 0
+        self.seen_handle: list[bool] = []
+
+    def poll(self):
+        return self.returncode
+
+    def send_signal(self, sig: int) -> None:
+        self.signals.append(sig)
+        if self.signal_error is not None:
+            raise self.signal_error
+        if not self.ignores_signal:
+            self.returncode = 0
+
+    def wait(self, timeout=None):
+        if self.owner is not None:
+            self.seen_handle.append(self.owner._recorder is self)
+        if self.returncode is None:
+            raise _subprocess.TimeoutExpired("live_transcribe.py", timeout)
+        return self.returncode
+
+    def kill(self) -> None:
+        self.kills += 1
+        if not self.unkillable:
+            self.returncode = -9
+
+
+@pytest.fixture(params=["app", "training"])
+def any_controller(request):
+    return _controller() if request.param == "app" else _training_controller()
+
+
+@pytest.fixture
+def fake_spawn(monkeypatch, tmp_path):
+    """Replace Popen in the dashboard with a double that 'writes' a transcript into a temp
+    OUTPUT_DIR, so each controller's REAL _spawn_recorder runs end to end without a recorder."""
+    calls: list[dict] = []
+    procs: list[FakeProc] = []
+    monkeypatch.setattr(dash, "OUTPUT_DIR", tmp_path)
+
+    def popen(cmd, **kwargs):
+        calls.append({"cmd": cmd, **kwargs})
+        (tmp_path / f"live_transcript_2099010{len(calls)}_000000.txt").write_text("", "utf-8")
+        proc = FakeProc()
+        procs.append(proc)
+        return proc
+
+    monkeypatch.setattr(dash.subprocess, "Popen", popen)
+    return SimpleNamespace(calls=calls, procs=procs)
+
+
+class TestRecorderStopWindows:
+    """#2036: on Windows `send_signal(SIGINT)` raises ValueError; the old stop path dropped the
+    handle first, crashed the hub, and orphaned a recorder still holding the mic."""
+
+    # (a) Windows: spawn in a new process group, stop with CTRL_BREAK_EVENT — both controllers
+    def test_windows_spawn_uses_a_new_process_group_and_stop_sends_ctrl_break(
+            self, monkeypatch, fake_spawn, any_controller):
+        monkeypatch.setattr(dash, "_ON_WINDOWS", True)
+        ctrl = any_controller
+        ctrl._spawn_recorder()
+        expected_flag = getattr(_subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        assert fake_spawn.calls[0]["creationflags"] == expected_flag
+        proc = fake_spawn.procs[0]
+        assert ctrl._recorder is proc
+
+        assert ctrl._stop_recorder() is True
+        assert proc.signals == [getattr(_signal, "CTRL_BREAK_EVENT", 1)]
+        assert proc.kills == 0 and ctrl._recorder is None
+
+    # (b) a ValueError from send_signal falls back to kill() and never raises
+    def test_unsupported_signal_falls_back_to_kill_without_raising(self, any_controller, caplog):
+        ctrl = any_controller
+        proc = FakeProc(signal_error=ValueError("Unsupported signal: 2"))
+        ctrl._recorder = proc
+        with caplog.at_level("WARNING", logger="dashboard"):
+            assert ctrl._stop_recorder() is True
+        assert proc.kills == 1 and proc.returncode == -9
+        assert ctrl._recorder is None
+        assert any("could not be signalled" in r.getMessage() and r.levelname == "WARNING"
+                   for r in caplog.records)
+
+    @pytest.mark.parametrize("error", [OSError("no console"), ProcessLookupError()])
+    def test_other_signal_failures_also_fall_back_to_kill(self, any_controller, error):
+        proc = FakeProc(signal_error=error)
+        any_controller._recorder = proc
+        assert any_controller._stop_recorder() is True and proc.kills == 1
+
+    def test_a_signal_the_child_ignores_times_out_into_kill(self, any_controller):
+        proc = FakeProc(ignores_signal=True)
+        any_controller._recorder = proc
+        assert any_controller._stop_recorder() is True
+        assert proc.kills == 1 and any_controller._recorder is None
+
+    def test_the_whole_stop_transcription_path_survives_the_windows_error(self):
+        ctrl = _controller()
+        proc = FakeProc(signal_error=ValueError("Unsupported signal: 2"))
+        ctrl._recorder, ctrl.transcription_on = proc, True
+        state = ctrl.stop_transcription()                 # must not raise (the hub crash)
+        assert state["transcription"] is False
+        assert proc.kills == 1 and ctrl._recorder is None
+
+    def test_training_shutdown_survives_the_windows_error(self):
+        ctrl = _training_controller()
+        proc = FakeProc(signal_error=ValueError("Unsupported signal: 2"))
+        ctrl._recorder, ctrl.transcription_on = proc, True
+        ctrl.shutdown()
+        assert proc.kills == 1 and ctrl._recorder is None and ctrl.transcription_on is False
+
+    # (c) the handle is retained until the process has actually exited
+    def test_the_handle_is_held_while_waiting_for_the_child(self, any_controller):
+        ctrl = any_controller
+        proc = FakeProc(ignores_signal=True, owner=ctrl)
+        ctrl._recorder = proc
+        ctrl._stop_recorder()
+        assert proc.seen_handle and all(proc.seen_handle), \
+            "the controller dropped its handle before the child exited"
+        assert ctrl._recorder is None                    # cleared only after the exit
+
+    def test_an_unkillable_recorder_keeps_its_handle_and_blocks_a_new_spawn(
+            self, any_controller, fake_spawn):
+        ctrl = any_controller
+        proc = FakeProc(ignores_signal=True, unkillable=True)
+        ctrl._recorder = proc
+        assert ctrl._stop_recorder() is False            # reported, not raised
+        assert ctrl._recorder is proc and ctrl.recorder_alive is True
+        with pytest.raises(dash.ControlError, match="could not be stopped"):
+            ctrl._spawn_recorder()                       # would orphan the old one
+        assert fake_spawn.calls == []
+
+    def test_an_already_exited_recorder_is_just_released(self, any_controller):
+        proc = FakeProc()
+        proc.returncode = 0
+        any_controller._recorder = proc
+        assert any_controller._stop_recorder() is True
+        assert proc.signals == [] and any_controller._recorder is None
+
+    # (d) POSIX behaviour is unchanged: no creationflags, SIGINT
+    def test_posix_spawn_has_no_creationflags_and_stop_sends_sigint(
+            self, monkeypatch, fake_spawn, any_controller):
+        monkeypatch.setattr(dash, "_ON_WINDOWS", False)
+        ctrl = any_controller
+        ctrl._spawn_recorder()
+        assert "creationflags" not in fake_spawn.calls[0]
+        assert ctrl._stop_recorder() is True
+        assert fake_spawn.procs[0].signals == [_signal.SIGINT]
+
+    def test_no_controller_sends_sigint_directly(self):
+        """One shared helper: neither controller may carry its own copy of the stop path."""
+        import inspect
+        for cls in (dash.AppController, dash.TrainingController):
+            assert "send_signal" not in inspect.getsource(cls)
+            assert issubclass(cls, dash._RecorderOwner)

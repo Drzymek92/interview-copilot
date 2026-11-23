@@ -248,6 +248,31 @@ def test_cli_arg_parsing():
     assert args.backend == "local"
 
 
+@pytest.mark.parametrize("value", ["feminine", "masculine"])
+def test_candidate_gender_flag_writes_the_field(tmp_path, monkeypatch, value):
+    """#2039: --candidate-gender is a fact the user states (D22 holds) — written verbatim as
+    candidate.grammatical_gender and read back by the real loader."""
+    args = gc.build_parser().parse_args(["--jd", "x", "--session", "acme_test", "--candidate-gender", value])
+    assert args.candidate_gender == value
+    monkeypatch.setattr(gc, "llm_call", _fixed_reply(GOOD_SECTIONS))
+    target = gc.run(_args(tmp_path, candidate_gender=value), sessions_dir=tmp_path)
+    assert json.loads(target.read_text(encoding="utf-8"))["candidate"] == {"grammatical_gender": value}
+    assert reasoning.load_bundle("acme_test", sessions_dir=tmp_path).candidate_gender == value
+
+
+def test_candidate_gender_omitted_leaves_no_candidate_key(tmp_path, monkeypatch):
+    assert gc.build_parser().parse_args(["--jd", "x", "--session", "s"]).candidate_gender == ""
+    monkeypatch.setattr(gc, "llm_call", _fixed_reply(GOOD_SECTIONS))
+    target = gc.run(_args(tmp_path), sessions_dir=tmp_path)            # no candidate_gender attr at all
+    assert "candidate" not in json.loads(target.read_text(encoding="utf-8"))
+    assert reasoning.load_bundle("acme_test", sessions_dir=tmp_path).candidate_gender is None
+
+
+def test_candidate_gender_flag_rejects_other_values():
+    with pytest.raises(SystemExit):
+        gc.build_parser().parse_args(["--jd", "x", "--session", "s", "--candidate-gender", "neuter"])
+
+
 def test_cli_requires_jd_and_session():
     parser = gc.build_parser()
     with pytest.raises(SystemExit):

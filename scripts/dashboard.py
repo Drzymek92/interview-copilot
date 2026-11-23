@@ -63,6 +63,7 @@ import asyncio
 import ipaddress
 import json
 import math
+import os
 import re
 import signal
 import subprocess
@@ -1162,15 +1163,135 @@ def _start_worker(args: argparse.Namespace, path: Path, state: DashboardState,
 SCRIPTS_DIR = Path(__file__).resolve().parent
 
 
+# --------------------------------------------------------------------------
+# Recorder process lifecycle (#2036) — ONE implementation shared by both controllers.
+#
+# POSIX: the child is stopped with SIGINT, which live_transcribe.py turns into a clean shutdown
+# (final flush, `=== RUN COMPLETE ===`, drift stats). Windows has no SIGINT for `send_signal`
+# (`ValueError: Unsupported signal: 2`), so there the child is spawned in its own process group
+# and stopped with CTRL_BREAK_EVENT, which it receives as SIGBREAK and handles the same way.
+# Any failure to signal, or a child that ignores the signal, falls back to a hard kill(). The
+# stop path never raises, and the caller keeps its handle until the child has really exited —
+# a failed stop must never orphan a process that is still holding the mic.
+# --------------------------------------------------------------------------
+_ON_WINDOWS = os.name == "nt"          # module global so tests can simulate either platform
+_WIN_CREATE_NEW_PROCESS_GROUP = 0x00000200   # subprocess.CREATE_NEW_PROCESS_GROUP on Windows
+_WIN_CTRL_BREAK_EVENT = 1                    # signal.CTRL_BREAK_EVENT on Windows
+RECORDER_STOP_GRACE_SECONDS = 10.0
+RECORDER_KILL_WAIT_SECONDS = 5.0
+
+
+def recorder_popen_kwargs() -> dict:
+    """Platform-specific `Popen` kwargs for the recorder child. On Windows the child gets its
+    own process group so CTRL_BREAK_EVENT can be aimed at it (and only it); POSIX: none."""
+    if _ON_WINDOWS:
+        return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP",
+                                         _WIN_CREATE_NEW_PROCESS_GROUP)}
+    return {}
+
+
+def recorder_stop_signal() -> int:
+    """The graceful-stop signal the recorder understands on this platform."""
+    if _ON_WINDOWS:
+        return getattr(signal, "CTRL_BREAK_EVENT", _WIN_CTRL_BREAK_EVENT)
+    return signal.SIGINT
+
+
+def spawn_recorder_process(cmd: list[str]) -> subprocess.Popen:
+    """Launch the live_transcribe.py child with the platform's spawn flags. Raises OSError."""
+    return subprocess.Popen(cmd, cwd=str(PROJECT_ROOT), stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, **recorder_popen_kwargs())
+
+
+def stop_recorder_process(proc: subprocess.Popen,
+                          grace: float = RECORDER_STOP_GRACE_SECONDS,
+                          kill_wait: float = RECORDER_KILL_WAIT_SECONDS) -> bool:
+    """Gracefully stop the recorder child: signal → wait → kill() fallback. Never raises.
+
+    Returns True once the child has exited (or was already gone), False if it is STILL running
+    after the kill fallback — the caller must then keep its handle rather than drop it."""
+    try:
+        if proc.poll() is not None:
+            return True
+    except Exception:
+        logger.warning("recorder pid=%s: poll() failed; stopping it anyway",
+                       getattr(proc, "pid", "?"), exc_info=True)
+    try:
+        proc.send_signal(recorder_stop_signal())
+        proc.wait(timeout=grace)
+        return True
+    except subprocess.TimeoutExpired:
+        logger.warning("recorder pid=%s ignored the stop signal for %.0fs — killing it",
+                       proc.pid, grace)
+    except (ValueError, OSError) as exc:   # ProcessLookupError is an OSError
+        logger.warning("recorder pid=%s could not be signalled (%s: %s) — killing it",
+                       proc.pid, type(exc).__name__, exc)
+    except Exception:
+        logger.warning("recorder pid=%s: unexpected error while stopping — killing it",
+                       proc.pid, exc_info=True)
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass                               # it exited between the signal and the kill
+    except Exception:
+        logger.warning("recorder pid=%s: kill() failed", proc.pid, exc_info=True)
+    try:
+        proc.wait(timeout=kill_wait)
+        return True
+    except Exception:
+        logger.error("recorder pid=%s is STILL running after kill(); keeping its handle",
+                     proc.pid, exc_info=True)
+        return False
+
+
 class ControlError(Exception):
     """A rejected switch (e.g. cloud asked for but not configured) — surfaced to the UI as 400."""
 
 
-class AppController:
+class _RecorderOwner:
+    """The handle-keeping half of the recorder lifecycle, shared by both controllers (#2036).
+    `_recorder` is cleared ONLY after the child has exited, so a failed stop leaves the handle in
+    place for a retry (the next stop, shutdown, or the guard before a new spawn)."""
+
+    _recorder: subprocess.Popen | None = None
+
+    @property
+    def recorder_alive(self) -> bool:
+        proc = self._recorder
+        return proc is not None and proc.poll() is None
+
+    def _stop_recorder(self) -> bool:
+        """Stop the recorder child if one is held. True when none is left running."""
+        proc = self._recorder
+        if proc is None:
+            return True
+        if stop_recorder_process(proc):
+            self._recorder = None
+            return True
+        return False
+
+    def _launch_recorder(self, cmd: list[str]) -> subprocess.Popen:
+        """Spawn a recorder, refusing while a previous one is still alive (it would be orphaned
+        by overwriting the handle). Raises ControlError on any failure."""
+        if not self._stop_recorder():
+            raise ControlError(
+                f"a previous recorder (pid={self._recorder.pid}) could not be stopped — "
+                "end it manually before starting a new capture"
+            )
+        try:
+            proc = spawn_recorder_process(cmd)
+        except OSError as exc:
+            raise ControlError(f"could not launch the recorder: {exc}") from exc
+        self._recorder = proc
+        return proc
+
+
+class AppController(_RecorderOwner):
     """#607 single-app mode: owns the recorder subprocess AND the transcript worker threads so
     the browser's three switches drive real state.
 
-      transcription on/off  → spawn / SIGINT the live_transcribe.py child (a TRUE capture stop:
+      transcription on/off  → spawn / gracefully stop the live_transcribe.py child (SIGINT on
+                              POSIX, CTRL_BREAK on Windows — #2036; a TRUE capture stop:
                               mic released, ~2.2 GB Whisper VRAM freed — not a paused display)
       suggestions  on/off   → Controls.suggestions_on; the ambient loop reads it live, so the
                               transcript + meter keep flowing while no model/GPU is touched
@@ -1239,12 +1360,18 @@ class AppController:
                 return self.ui_state()
             if self._worker_stop is not None:
                 self._worker_stop.set()            # ends the follow loops within a poll interval
-            self._stop_recorder()                  # SIGINT → wait → kill (we hold the handle)
+            # signal → wait → kill (we hold the handle until the child has exited — #2036)
+            stopped = self._stop_recorder()
             if self._qa_pairer is not None:
                 self._qa_pairer.close()            # D32 — flush the last open Q&A pair to disk
             self.transcription_on = False
             self._current_path = None
-            logger.info("transcription OFF — recorder stopped, capture released")
+            if stopped:
+                logger.info("transcription OFF — recorder stopped, capture released")
+            else:
+                logger.error("transcription OFF — but the recorder pid=%s would not die; its "
+                             "handle is kept and a restart is refused until it is gone",
+                             self._recorder.pid if self._recorder else "?")
             return self._broadcast()
 
     def _spawn_recorder(self) -> Path:
@@ -1253,12 +1380,7 @@ class AppController:
                "--source", settings.COPILOT_SOURCE, "--mic", settings.COPILOT_MIC]
         if not self.partials_on:
             cmd.append("--no-partials")
-        try:
-            proc = subprocess.Popen(cmd, cwd=str(PROJECT_ROOT),
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except OSError as exc:
-            raise ControlError(f"could not launch the recorder: {exc}") from exc
-        self._recorder = proc
+        proc = self._launch_recorder(cmd)          # raises ControlError on failure
         deadline = time.monotonic() + max(1.0, settings.COPILOT_RECORDER_WAIT_SECONDS)
         while time.monotonic() < deadline:
             for p in sorted(OUTPUT_DIR.glob("live_transcript_2*.txt")):
@@ -1276,20 +1398,6 @@ class AppController:
             f"the recorder wrote no transcript within {settings.COPILOT_RECORDER_WAIT_SECONDS:g}s "
             "— is a capture source available? (COPILOT_MIC / COPILOT_SOURCE)"
         )
-
-    def _stop_recorder(self) -> None:
-        proc, self._recorder = self._recorder, None
-        if proc is None or proc.poll() is not None:
-            return
-        try:
-            proc.send_signal(signal.SIGINT)        # clean shutdown: flushes RUN COMPLETE + drift
-            proc.wait(timeout=10)
-        except (subprocess.TimeoutExpired, ProcessLookupError):
-            try:
-                proc.kill()
-                proc.wait(timeout=5)
-            except Exception:
-                logger.exception("recorder did not die on kill()")
 
     def _start_workers(self, path: Path, stop: threading.Event) -> None:
         self._qa_pairer = QaPairer(qa_log_path(path))   # D32 — capture this run's Q&A pairs
@@ -1416,10 +1524,11 @@ def scorecard_payload(report: SessionReport) -> dict:
     }
 
 
-class TrainingController:
+class TrainingController(_RecorderOwner):
     """#650 training mode: a sibling to AppController that drives a mock interview.
 
-    It reuses the recorder lifecycle (spawn / SIGINT the `live_transcribe.py` child) but launches
+    It reuses the recorder lifecycle (`_RecorderOwner`: spawn / graceful stop of the
+    `live_transcribe.py` child) but launches
     it with `--mic-only` — a monologue capture that tags every segment `you`, with no remote
     channel. It builds a `TrainingSession` from `training.generate_questions`, tails the transcript
     through the same D19 `follow_transcript` seam the copilot uses, routes each `you:` segment to
@@ -1547,12 +1656,7 @@ class TrainingController:
                "--mic-only", "--mic", settings.COPILOT_MIC]
         if not self.partials_on:
             cmd.append("--no-partials")
-        try:
-            proc = subprocess.Popen(cmd, cwd=str(PROJECT_ROOT),
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except OSError as exc:
-            raise ControlError(f"could not launch the recorder: {exc}") from exc
-        self._recorder = proc
+        proc = self._launch_recorder(cmd)          # raises ControlError on failure
         deadline = time.monotonic() + max(1.0, settings.COPILOT_RECORDER_WAIT_SECONDS)
         while time.monotonic() < deadline:
             for p in sorted(OUTPUT_DIR.glob("live_transcript_2*.txt")):
@@ -1570,20 +1674,6 @@ class TrainingController:
             f"the recorder wrote no transcript within {settings.COPILOT_RECORDER_WAIT_SECONDS:g}s "
             "— is a microphone available? (COPILOT_MIC)"
         )
-
-    def _stop_recorder(self) -> None:
-        proc, self._recorder = self._recorder, None
-        if proc is None or proc.poll() is not None:
-            return
-        try:
-            proc.send_signal(signal.SIGINT)
-            proc.wait(timeout=10)
-        except (subprocess.TimeoutExpired, ProcessLookupError):
-            try:
-                proc.kill()
-                proc.wait(timeout=5)
-            except Exception:
-                logger.exception("recorder did not die on kill()")
 
     def _start_workers(self, path: Path, stop: threading.Event) -> None:
         """Tail the transcript and route each `you:` segment to the active question's buffer.
@@ -1670,7 +1760,7 @@ def _run_app(args: argparse.Namespace) -> None:
     try:
         uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     finally:
-        controller.shutdown()            # SIGINT the recorder on exit — never orphan capture
+        controller.shutdown()            # stop the recorder on exit — never orphan capture
 
 
 def _run_training(args: argparse.Namespace) -> None:
@@ -1718,7 +1808,7 @@ def _run_training(args: argparse.Namespace) -> None:
     try:
         uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     finally:
-        controller.shutdown()            # SIGINT the recorder on exit — never orphan capture
+        controller.shutdown()            # stop the recorder on exit — never orphan capture
 
 
 def _open_browser(url: str) -> None:

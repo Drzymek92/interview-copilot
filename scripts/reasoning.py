@@ -224,6 +224,11 @@ class ContextBundle:
     # #324 fix 5 — OPTIONAL. A bundle without this key loads with an empty list, exactly like
     # question_bank/honesty_boundary before it: schema stays v2, old bundles load unchanged.
     tactics: list[Tactic] = field(default_factory=list)
+    # #2039 (D30 amendment 2026-11-23) — OPTIONAL `candidate.grammatical_gender`: "feminine" /
+    # "masculine", or None (unset). A fact the user states, never generated (D22). When set, the
+    # suggestion prompt pins the first-person gender (Polish past tense -łam/-łem) so the model stops
+    # guessing per suggestion; unset leaves the prompt byte-identical to the pre-#2039 one.
+    candidate_gender: str | None = None
 
     def warn_lines(self) -> list[str]:
         """Named-as-placeholder sections. Printed at load so a fixture is never mistaken
@@ -267,6 +272,32 @@ def _list_section(raw_value: object, label: str, placeholders: list[str]) -> lis
             placeholders.append(label)
         return []
     return list(raw_value or [])
+
+
+CANDIDATE_GENDERS = ("feminine", "masculine")
+
+
+def _parse_candidate_gender(raw_value: object) -> str | None:
+    """`candidate: {"grammatical_gender": "feminine" | "masculine"}` -> the value, else None.
+
+    Absent key, a missing/blank `grammatical_gender` or `null` -> None silently (old bundles load
+    unchanged). A malformed `candidate` block or an unknown value -> None with a WARNING, never a
+    raise: a typo here must not cost the user their live session."""
+    if raw_value is None:
+        return None
+    if not isinstance(raw_value, dict):
+        logger.warning("bundle `candidate` must be an object, got %s — ignored (gender unset)",
+                       type(raw_value).__name__)
+        return None
+    value = raw_value.get("grammatical_gender")
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    normalized = str(value).strip().lower()
+    if normalized not in CANDIDATE_GENDERS:
+        logger.warning("bundle `candidate.grammatical_gender` %r is not one of %s — ignored (gender unset)",
+                       value, "/".join(CANDIDATE_GENDERS))
+        return None
+    return normalized
 
 
 def load_bundle(session: str, sessions_dir: Path | None = None) -> ContextBundle:
@@ -345,6 +376,7 @@ def load_bundle(session: str, sessions_dir: Path | None = None) -> ContextBundle
             Tactic(topic=str(t.get("topic", "")), note=str(t.get("note", "")))
             for t in _list_section(raw.get("tactics"), "tactics", placeholders)
         ],
+        candidate_gender=_parse_candidate_gender(raw.get("candidate")),
     )
     logger.info(
         "bundle %s loaded | role=%r company=%r | %d STAR, %d plan steps, %d honesty rows, "
@@ -568,7 +600,7 @@ Each line below is something the candidate decided IN ADVANCE about how to handl
 topic — not a fact to cite, an instruction to follow when that topic comes up.
 {tactics}
 
-{language_rule}
+{candidate_voice}{language_rule}
 """
 
 # Human-readable speaker labels for the conversation history (G9/#326). The transcript tags
@@ -640,6 +672,28 @@ def _tactics_block(bundle: ContextBundle) -> str:
     return "\n".join(t.as_prompt_block() for t in bundle.tactics)
 
 
+# #2039 — ONE line, rendered only when the bundle sets `candidate.grammatical_gender`. It sits inside
+# the cached system prefix (a per-bundle constant) and BEFORE the language rule, which stays last
+# (session-18b prefix-cache finding). Unset -> "" so the system prompt is byte-identical to pre-#2039.
+CANDIDATE_VOICE_EXAMPLES = {
+    "feminine": "-łam: \"wdrażałam\", \"nie miałam\" — never -łem",
+    "masculine": "-łem: \"wdrażałem\", \"nie miałem\" — never -łam",
+}
+CANDIDATE_VOICE_RULE = (
+    "CANDIDATE VOICE: you write as the candidate, in the first person, and the candidate uses "
+    "{GENDER} grammatical gender — every form referring to the candidate must be {gender} "
+    "(e.g. Polish past tense {example}), the same in every suggestion.\n\n"
+)
+
+
+def _candidate_voice(bundle: ContextBundle) -> str:
+    gender = bundle.candidate_gender
+    if gender not in CANDIDATE_VOICE_EXAMPLES:
+        return ""
+    return CANDIDATE_VOICE_RULE.format(GENDER=gender.upper(), gender=gender,
+                                       example=CANDIDATE_VOICE_EXAMPLES[gender])
+
+
 def resolve_languages(
     bundle: ContextBundle, segment: str,
     suggestion_language: str | None = None, spoken_language: str | None = None,
@@ -705,6 +759,7 @@ def build_messages(
         answer_bank="\n".join(e.as_prompt_block() for e in bundle.answer_bank) or "(none)",
         plan=_plan_block(bundle),
         tactics=_tactics_block(bundle),
+        candidate_voice=_candidate_voice(bundle),
     )
     user = USER_TEMPLATE.format(
         spoken_name=spoken_name,
