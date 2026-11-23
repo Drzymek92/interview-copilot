@@ -26,6 +26,10 @@ capability milestone rather than by semantic version.
   across suggestions (Polish `-łam` / `-łem`). Set it by hand, with
   `generate_context.py --candidate-gender`, or from the Generate view; unset leaves the prompt
   byte-identical. See [`docs/SESSION_BUNDLE.md`](docs/SESSION_BUNDLE.md).
+- **Windows Desktop shortcut** — `scripts\install_desktop_shortcut.ps1` creates it;
+  `scripts\launch_copilot.bat` starts the hub in a console window (needed for the Ctrl-Break stop)
+  with the venv's Python, and `scripts/ollama_keepalive.py` keeps the model loaded during the call
+  and exits with the hub. See SETUP → Desktop launcher.
 
 ## 2026-09-30 — hub, practice track, review
 

@@ -194,12 +194,28 @@ python scripts/reasoning.py --session my_interview --watch          # follow the
 ```
 
 ### Desktop launcher (optional)
+
+**Linux**
 ```bash
 sed "s|__PROJECT_DIR__|$PWD|g" interview-copilot.desktop.template \
   > ~/.local/share/applications/interview-copilot.desktop
 # then mark it trusted (file manager: right-click ▸ Allow Launching)
 ```
 Set a default session with `COPILOT_SESSION` (see [`scripts/launch_copilot.sh`](scripts/launch_copilot.sh)).
+
+**Windows** — from the project folder, in PowerShell:
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install_desktop_shortcut.ps1
+# or preselect a bundle on the Call screen:
+powershell -ExecutionPolicy Bypass -File scripts\install_desktop_shortcut.ps1 -Session my_interview
+```
+This puts an **Interview Copilot** shortcut on your Desktop that runs
+[`scripts\launch_copilot.bat`](scripts/launch_copilot.bat). It uses `.venv\Scripts\python.exe` when the
+venv exists (else `python` on PATH, or `COPILOT_PYTHON`), keeps the Ollama model loaded during the call
+([`scripts/ollama_keepalive.py`](scripts/ollama_keepalive.py)), and opens the menu in your browser.
+**Keep its console window open during a call** — stopping transcription signals the recorder through
+that console; close the window (or press Ctrl-C) to stop everything. You can also run
+`scripts\launch_copilot.bat` directly, optionally with a bundle id: `scripts\launch_copilot.bat my_interview`.
 
 ---
 
